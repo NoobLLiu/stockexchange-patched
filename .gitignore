@@ -1,0 +1,19 @@
+# Build output
+build/
+
+# IDE files
+.classpath
+.project
+.settings/
+*.iml
+.idea/
+*.ipr
+*.iws
+out/
+
+# OS files
+Thumbs.db
+.DS_Store
+
+# Logs
+*.log

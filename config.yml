@@ -1,0 +1,42 @@
+# StockExchange 配置文件
+
+database:
+  type: FILE
+  mysql:
+    host: localhost
+    port: 3306
+    database: exchange
+    username: root
+    password: pass
+
+trading:
+  price_tick: 0.01
+  min_price: 0.01
+  max_price: 99999999.99
+  max_order_quantity: 2304
+  order_expire_days: 30
+  ignore_durability: false
+  ignore_tags:
+    - "Unbreakable"
+    - "Damage"
+
+tax:
+  rate_percent: 10.0
+  system_account: ""
+
+price_limit:
+  enabled: true
+  limit_up_percent: 10.0
+  limit_down_percent: 10.0
+
+gui:
+  update_interval_ticks: 20
+
+market:
+  daily_register_limit: 5
+  auto_remove_empty_days: 2
+  diamond_to_money_amount: 1000
+  diamond_material: DIAMOND
+  currency_name: "暮球"
+
+version: auto

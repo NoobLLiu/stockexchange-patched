@@ -1,0 +1,63 @@
+name: StockExchange
+version: 1.0.6-gmzc
+main: com.github.exchange.StockExchangePlugin
+api-version: "1.21"
+depend: [Vault]
+softdepend: [floodgate, Geyser-Spigot, XConomy, MGActivitys]
+author: Codex
+description: GMZC patched stock exchange plugin
+
+commands:
+  se:
+    description: Main stock exchange command
+    aliases: [exchange, ex, stock]
+    usage: "/se <subcommand> [args]"
+  exchange:
+    description: Main stock exchange command (explicit entry for compatibility)
+    usage: "/exchange <subcommand> [args]"
+
+permissions:
+  exchange.*:
+    description: All exchange permissions
+    default: op
+    children:
+      exchange.sell: true
+      exchange.buy: true
+      exchange.market.buy: true
+      exchange.market.sell: true
+      exchange.cancel: true
+      exchange.history: true
+      exchange.info: true
+      exchange.gui: true
+      exchange.admin: true
+      exchange.register: true
+  exchange.sell:
+    description: Allow selling items
+    default: true
+  exchange.buy:
+    description: Allow placing buy orders
+    default: true
+  exchange.market.buy:
+    description: Allow market buy orders
+    default: true
+  exchange.market.sell:
+    description: Allow market sell orders
+    default: true
+  exchange.cancel:
+    description: Allow cancelling own orders
+    default: true
+  exchange.history:
+    description: Allow viewing trade history
+    default: true
+  exchange.info:
+    description: Allow viewing item info
+    default: true
+  exchange.gui:
+    description: Allow opening GUI
+    default: true
+  exchange.register:
+    description: Allow registering and restocking market items through GUI
+    default: true
+  exchange.admin:
+    description: Admin commands
+    default: op
