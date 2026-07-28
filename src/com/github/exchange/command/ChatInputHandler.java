@@ -105,6 +105,94 @@ implements Listener {
         });
     }
 
+    public void startAddItemSearchInput(Player player) {
+        if (this.plugin.isBedrockPlayer(player)) {
+            this.openBedrockAddItemSearchForm(player);
+            return;
+        }
+        player.closeInventory();
+        String placeholder = "\u8f93\u5165\u7269\u54c1\u540d\u79f0\u6216 ID";
+        anvilInputGUI.openInput(player, "\u00a7e\u641c\u7d22\u6dfb\u52a0", placeholder, query -> {
+            if (query == null) {
+                com.github.exchange.gui.ExchangeGUI.openAddItemMenu(this.plugin, player);
+                return;
+            }
+            if (query.isBlank()) {
+                player.sendMessage("\u00a7e\u641c\u7d22\u5173\u952e\u8bcd\u4e0d\u80fd\u4e3a\u7a7a\u3002");
+                com.github.exchange.gui.ExchangeGUI.openAddItemMenu(this.plugin, player);
+                return;
+            }
+            String trimmed = query.trim();
+            com.github.exchange.model.ExchangeItem matched = null;
+            for (com.github.exchange.model.ExchangeItem item : this.plugin.getItemManager().getAllItems()) {
+                if (com.github.exchange.gui.MarketListingSearch.matches(trimmed, item.getId(), 
+                        com.github.exchange.util.ItemDisplayNames.resolve(com.github.exchange.util.ItemSerializer.itemFromBase64(item.getItemBase64())),
+                        item.getItemName(), item.getMaterial())) {
+                    matched = item;
+                    break;
+                }
+            }
+            if (matched == null) {
+                player.sendMessage("\u00a7c\u672a\u627e\u5230\u5339\u914d\u7684\u5546\u54c1\uff1a" + trimmed);
+                com.github.exchange.gui.ExchangeGUI.openAddItemMenu(this.plugin, player);
+                return;
+            }
+            org.bukkit.inventory.ItemStack baseItem = com.github.exchange.util.ItemSerializer.itemFromBase64(matched.getItemBase64());
+            if (baseItem == null) {
+                player.sendMessage("\u00a7c\u5546\u54c1\u6570\u636e\u89e3\u6790\u5931\u8d25\u3002");
+                com.github.exchange.gui.ExchangeGUI.openAddItemMenu(this.plugin, player);
+                return;
+            }
+            com.github.exchange.manager.ItemManager.RegisterResult result = this.plugin.getItemManager().registerCatalogItem(player, baseItem);
+            player.sendMessage(result.getMessage());
+            com.github.exchange.gui.ExchangeGUI.openAddItemMenu(this.plugin, player);
+        });
+    }
+
+    private void openBedrockAddItemSearchForm(Player player) {
+        player.closeInventory();
+        org.geysermc.cumulus.form.CustomForm.Builder builder = org.geysermc.cumulus.form.CustomForm.builder()
+            .title("\u641c\u7d22\u6dfb\u52a0")
+            .input("\u8f93\u5165\u7269\u54c1\u540d\u79f0\u6216 ID", "\u4f8b\u5982\uff1a\u94bb\u77f3\u3001diamond_sword\u300111")
+            .validResultHandler(response -> org.bukkit.Bukkit.getScheduler().runTask(this.plugin, () -> {
+                String query = response.asInput(0);
+                if (query == null || query.isBlank()) {
+                    player.sendMessage("\u00a7e\u641c\u7d22\u5173\u952e\u8bcd\u4e0d\u80fd\u4e3a\u7a7a\u3002");
+                    com.github.exchange.gui.ExchangeGUI.openAddItemMenu(this.plugin, player);
+                    return;
+                }
+                String trimmed = query.trim();
+                com.github.exchange.model.ExchangeItem matched = null;
+                for (com.github.exchange.model.ExchangeItem item : this.plugin.getItemManager().getAllItems()) {
+                    if (com.github.exchange.gui.MarketListingSearch.matches(trimmed, item.getId(),
+                            com.github.exchange.util.ItemDisplayNames.resolve(com.github.exchange.util.ItemSerializer.itemFromBase64(item.getItemBase64())),
+                            item.getItemName(), item.getMaterial())) {
+                        matched = item;
+                        break;
+                    }
+                }
+                if (matched == null) {
+                    player.sendMessage("\u00a7c\u672a\u627e\u5230\u5339\u914d\u7684\u5546\u54c1\uff1a" + trimmed);
+                    com.github.exchange.gui.ExchangeGUI.openAddItemMenu(this.plugin, player);
+                    return;
+                }
+                org.bukkit.inventory.ItemStack baseItem = com.github.exchange.util.ItemSerializer.itemFromBase64(matched.getItemBase64());
+                if (baseItem == null) {
+                    player.sendMessage("\u00a7c\u5546\u54c1\u6570\u636e\u89e3\u6790\u5931\u8d25\u3002");
+                    com.github.exchange.gui.ExchangeGUI.openAddItemMenu(this.plugin, player);
+                    return;
+                }
+                com.github.exchange.manager.ItemManager.RegisterResult result = this.plugin.getItemManager().registerCatalogItem(player, baseItem);
+                player.sendMessage(result.getMessage());
+                com.github.exchange.gui.ExchangeGUI.openAddItemMenu(this.plugin, player);
+            }))
+            .closedResultHandler(() -> org.bukkit.Bukkit.getScheduler().runTask(
+                this.plugin,
+                () -> com.github.exchange.gui.ExchangeGUI.openAddItemMenu(this.plugin, player)
+            ));
+        org.geysermc.floodgate.api.FloodgateApi.getInstance().sendForm(player.getUniqueId(), builder);
+    }
+
     private void openBedrockPriceQuantityForm(Player player, ExchangeItem exchangeItem, String action) {
         player.closeInventory();
         CustomForm.Builder builder = CustomForm.builder()
