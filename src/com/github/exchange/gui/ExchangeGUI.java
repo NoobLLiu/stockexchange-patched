@@ -395,7 +395,6 @@ implements Listener {
         inv.setItem(4, ExchangeGUI.createItem(Material.EMERALD, "\u00a7a\u6dfb\u52a0\u8bf4\u660e", "\u00a77\u5c06\u8981\u65b0\u589e\u7684\u7269\u54c1\u653e\u5165\u4e0b\u65b9\u8f93\u5165\u69fd", "\u00a77\u53ea\u4f1a\u628a\u8be5\u7269\u54c1\u52a0\u5165\u5e02\u573a\u76ee\u5f55\uff0c\u4e0d\u4f1a\u6d88\u8017\u80cc\u5305\u7269\u54c1"));
         inv.setItem(ADD_ITEM_INPUT_SLOT, null);
         inv.setItem(SMALL_BACK_SLOT, ExchangeGUI.createItem(Material.ARROW, BACK_TO_PREVIOUS, "\u00a77\u8fd4\u56de\u54c1\u79cd\u5217\u8868"));
-        inv.setItem(22, ExchangeGUI.createItem(Material.NAME_TAG, "\u00a7e\u641c\u7d22\u6dfb\u52a0", "\u00a77\u8f93\u5165\u7269\u54c1\u540d\u79f0\u6216 ID \u641c\u7d22\u5df2\u6709\u5546\u54c1", "\u00a77\u70b9\u51fb\u6253\u5f00\u641c\u7d22\u8f93\u5165"));
         guiState.put(player.getUniqueId(), ADD_ITEM);
         guiItemId.remove(player.getUniqueId());
         guiPage.put(player.getUniqueId(), Math.max(1, sourcePage));
@@ -1152,8 +1151,6 @@ implements Listener {
                 if (displayName.contains("\u8fd4\u56de")) {
                     guiNavigating.put(uuid, true);
                     ExchangeGUI.openItemList(plugin, clicker, guiPage.getOrDefault(uuid, 1));
-                } else if (displayName.contains("\u641c\u7d22\u6dfb\u52a0")) {
-                    plugin.getChatInputHandler().startAddItemSearchInput(clicker);
                 } else if (displayName.contains("\u4e0a\u5e02\u8bf4\u660e")) {
                     clicker.sendMessage("\u00a7e\u8bf7\u5c06\u80cc\u5305\u4e2d\u8981\u4e0a\u5e02\u7684\u7269\u54c1\u70b9\u51fb\u6216\u79fb\u5165\u8f93\u5165\u69fd\u3002");
                 }
