@@ -98,6 +98,7 @@ if ($pluginSources.Count -gt 0) {
 Copy-Item -LiteralPath (Join-Path $projectRoot 'plugin.yml') -Destination $pluginOut
 Copy-Item -LiteralPath (Join-Path $projectRoot 'config.yml') -Destination $pluginOut
 Copy-Item -LiteralPath (Join-Path $projectRoot 'vanilla-zh-cn.properties') -Destination $pluginOut
+Copy-Item -LiteralPath (Join-Path $projectRoot 'data\item_database.json') -Destination (Join-Path $pluginOut 'data')
 
 $testSources = @(Get-ChildItem -LiteralPath (Join-Path $projectRoot 'test') -Recurse -Filter *.java -ErrorAction SilentlyContinue | ForEach-Object FullName)
 if ($testSources.Count -gt 0) {

@@ -11,11 +11,15 @@ package com.github.exchange.command;
 
 import com.github.exchange.StockExchangePlugin;
 import com.github.exchange.gui.ExchangeGUI;
+import com.github.exchange.manager.ItemManager;
 import com.github.exchange.model.ExchangeItem;
+import com.github.exchange.util.ItemDatabase;
+import com.github.exchange.util.ItemSerializer;
 import java.math.BigDecimal;
 import org.bukkit.Bukkit;
 import org.bukkit.entity.Player;
 import org.bukkit.event.Listener;
+import org.bukkit.inventory.ItemStack;
 import org.geysermc.cumulus.form.CustomForm;
 import org.geysermc.floodgate.api.FloodgateApi;
 
@@ -222,4 +226,72 @@ implements Listener {
         player.sendMessage(result);
     }
 
+    public void startAddItemSearchInput(Player player) {
+        if (this.plugin.isBedrockPlayer(player)) {
+            this.openBedrockAddItemSearchForm(player);
+            return;
+        }
+        player.closeInventory();
+        anvilInputGUI.openInput(player, "\u00a7e\u641c\u7d22\u6dfb\u52a0", "\u8f93\u5165\u7269\u54c1\u540d\u79f0\u6216 ID", query -> {
+            if (query == null) {
+                ExchangeGUI.openAddItemMenu(this.plugin, player);
+                return;
+            }
+            if (query.isBlank()) {
+                player.sendMessage("\u00a7e\u641c\u7d22\u5173\u952e\u8bcd\u4e0d\u80fd\u4e3a\u7a7a\u3002");
+                ExchangeGUI.openAddItemMenu(this.plugin, player);
+                return;
+            }
+            ItemDatabase.ItemEntry entry = this.plugin.getItemDatabase().search(query.trim());
+            if (entry == null) {
+                player.sendMessage("\u00a7c\u672a\u627e\u5230\u5339\u914d\u7684\u7269\u54c1\uff1a" + query.trim());
+                ExchangeGUI.openAddItemMenu(this.plugin, player);
+                return;
+            }
+            org.bukkit.inventory.ItemStack baseItem = this.plugin.getItemDatabase().createItemStack(entry);
+            if (baseItem == null) {
+                player.sendMessage("\u00a7c\u65e0\u6cd5\u521b\u5efa\u7269\u54c1\uff1a" + entry.getName() + " (" + entry.getId() + ")");
+                ExchangeGUI.openAddItemMenu(this.plugin, player);
+                return;
+            }
+            ItemManager.RegisterResult result = this.plugin.getItemManager().registerCatalogItem(player, baseItem);
+            player.sendMessage(result.getMessage());
+            ExchangeGUI.openAddItemMenu(this.plugin, player);
+        });
+    }
+
+    private void openBedrockAddItemSearchForm(Player player) {
+        player.closeInventory();
+        CustomForm.Builder builder = CustomForm.builder()
+            .title("\u641c\u7d22\u6dfb\u52a0")
+            .input("\u8f93\u5165\u7269\u54c1\u540d\u79f0\u6216 ID", "\u4f8b\u5982\uff1a\u94bb\u77f3\u3001diamond sword\u3001white_cushion")
+            .validResultHandler(response -> Bukkit.getScheduler().runTask(this.plugin, () -> {
+                String query = response.asInput(0);
+                if (query == null || query.isBlank()) {
+                    player.sendMessage("\u00a7e\u641c\u7d22\u5173\u952e\u8bcd\u4e0d\u80fd\u4e3a\u7a7a\u3002");
+                    ExchangeGUI.openAddItemMenu(this.plugin, player);
+                    return;
+                }
+                ItemDatabase.ItemEntry entry = this.plugin.getItemDatabase().search(query.trim());
+                if (entry == null) {
+                    player.sendMessage("\u00a7c\u672a\u627e\u5230\u5339\u914d\u7684\u7269\u54c1\uff1a" + query.trim());
+                    ExchangeGUI.openAddItemMenu(this.plugin, player);
+                    return;
+                }
+                ItemStack baseItem = this.plugin.getItemDatabase().createItemStack(entry);
+                if (baseItem == null) {
+                    player.sendMessage("\u00a7c\u65e0\u6cd5\u521b\u5efa\u7269\u54c1\uff1a" + entry.getName() + " (" + entry.getId() + ")");
+                    ExchangeGUI.openAddItemMenu(this.plugin, player);
+                    return;
+                }
+                ItemManager.RegisterResult result = this.plugin.getItemManager().registerCatalogItem(player, baseItem);
+                player.sendMessage(result.getMessage());
+                ExchangeGUI.openAddItemMenu(this.plugin, player);
+            }))
+            .closedResultHandler(() -> Bukkit.getScheduler().runTask(
+                this.plugin,
+                () -> ExchangeGUI.openAddItemMenu(this.plugin, player)
+            ));
+        FloodgateApi.getInstance().sendForm(player.getUniqueId(), builder);
+    }
 }

@@ -31,6 +31,7 @@ import com.github.exchange.storage.FileStorageManager;
 import com.github.exchange.storage.MySQLStorageManager;
 import com.github.exchange.storage.StorageManager;
 import com.github.exchange.util.EconomyUtil;
+import com.github.exchange.util.ItemDatabase;
 import com.github.exchange.util.TaxCalculator;
 import java.math.BigDecimal;
 import java.util.Collections;
@@ -66,6 +67,7 @@ extends JavaPlugin {
     private TradeManager tradeManager;
     private EscrowManager escrowManager;
     private ChatInputHandler chatInputHandler;
+    private ItemDatabase itemDatabase;
     private boolean storageAvailable = true;
     private double priceTick;
     private double minPrice;
@@ -118,6 +120,7 @@ extends JavaPlugin {
         this.tradeManager = new TradeManager(this);
         this.escrowManager = new EscrowManager(this);
         this.chatInputHandler = new ChatInputHandler(this);
+        this.itemDatabase = new ItemDatabase(this.getLogger());
         ExchangeCommand exchangeCmd = new ExchangeCommand(this);
         PluginCommand seCommand = this.getCommand("se");
         if (seCommand != null) {
@@ -329,6 +332,10 @@ extends JavaPlugin {
 
     public ChatInputHandler getChatInputHandler() {
         return this.chatInputHandler;
+    }
+
+    public ItemDatabase getItemDatabase() {
+        return this.itemDatabase;
     }
 
     public double getPriceTick() {
