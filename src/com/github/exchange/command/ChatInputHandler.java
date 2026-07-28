@@ -256,7 +256,11 @@ implements Listener {
             }
             ItemManager.RegisterResult result = this.plugin.getItemManager().registerCatalogItem(player, baseItem);
             player.sendMessage(result.getMessage());
-            ExchangeGUI.openAddItemMenu(this.plugin, player);
+            if (result.isSuccess()) {
+                ExchangeGUI.openCatalogSearchResults(this.plugin, player, entry.getId(), 1);
+            } else {
+                ExchangeGUI.openAddItemMenu(this.plugin, player);
+            }
         });
     }
 
@@ -286,7 +290,11 @@ implements Listener {
                 }
                 ItemManager.RegisterResult result = this.plugin.getItemManager().registerCatalogItem(player, baseItem);
                 player.sendMessage(result.getMessage());
-                ExchangeGUI.openAddItemMenu(this.plugin, player);
+                if (result.isSuccess()) {
+                    ExchangeGUI.openCatalogSearchResults(this.plugin, player, entry.getId(), 1);
+                } else {
+                    ExchangeGUI.openAddItemMenu(this.plugin, player);
+                }
             }))
             .closedResultHandler(() -> Bukkit.getScheduler().runTask(
                 this.plugin,
