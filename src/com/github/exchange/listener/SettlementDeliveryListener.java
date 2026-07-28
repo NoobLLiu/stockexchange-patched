@@ -1,9 +1,10 @@
 package com.github.exchange.listener;
 
 import com.github.exchange.StockExchangePlugin;
-import com.github.exchange.manager.DeliveryPlan;
 import com.github.exchange.storage.StorageManager;
 import com.github.exchange.util.EconomyUtil;
+import com.github.exchange.util.InventoryDelivery;
+import com.github.exchange.util.ItemDisplayNames;
 import com.github.exchange.util.ItemSerializer;
 import java.math.BigDecimal;
 import java.util.Map;
@@ -39,28 +40,43 @@ public class SettlementDeliveryListener implements Listener {
         }
         Map<String, Integer> pendingItems = storage.getPlayerItemWarehouse(playerUuid);
         int delivered = 0;
+        int mailed = 0;
+        int dropped = 0;
         for (Map.Entry<String, Integer> entry : pendingItems.entrySet()) {
             ItemStack baseItem = ItemSerializer.itemFromBase64(entry.getKey());
             int quantity = entry.getValue() == null ? 0 : entry.getValue();
             if (baseItem == null || quantity <= 0) {
                 continue;
             }
-            int maxStack = Math.max(1, baseItem.getMaxStackSize());
-            for (int chunkAmount : DeliveryPlan.chunks(quantity, maxStack)) {
-                ItemStack giveStack = baseItem.clone();
-                giveStack.setAmount(chunkAmount);
-                for (ItemStack leftover : player.getInventory().addItem(new ItemStack[]{giveStack}).values()) {
-                    if (leftover == null) {
-                        continue;
-                    }
-                    player.getWorld().dropItemNaturally(player.getLocation(), leftover);
+            String displayName = ItemDisplayNames.resolve(baseItem);
+            int added = InventoryDelivery.addUpTo(player, baseItem, quantity);
+            int remaining = quantity - added;
+            delivered += added;
+            if (remaining > 0) {
+                ItemStack leftoverStack = baseItem.clone();
+                leftoverStack.setAmount(remaining);
+                if (this.plugin.sendItemsAsMail(player, displayName, leftoverStack)) {
+                    mailed += remaining;
+                } else {
+                    player.getWorld().dropItemNaturally(player.getLocation(), leftoverStack);
+                    dropped += remaining;
                 }
             }
             storage.takeFromPlayerItemWarehouse(playerUuid, entry.getKey(), quantity);
-            delivered += quantity;
         }
-        if (delivered > 0) {
-            player.sendMessage("\u00a7a\u4f60\u79bb\u7ebf\u671f\u95f4\u8d2d\u4e70\u6216\u6210\u4ea4\u7684\u7269\u54c1\u5df2\u81ea\u52a8\u53d1\u653e x" + delivered + "\u3002");
+        if (delivered > 0 || mailed > 0 || dropped > 0) {
+            StringBuilder msg = new StringBuilder("\u00a7a\u4f60\u79bb\u7ebf\u671f\u95f4\u8d2d\u4e70\u6216\u6210\u4ea4\u7684\u7269\u54c1\u5df2\u81ea\u52a8\u53d1\u653e");
+            if (delivered > 0) {
+                msg.append("\uff0c\u80cc\u5305\u53d6\u5f97 x").append(delivered);
+            }
+            if (mailed > 0) {
+                msg.append("\uff0c\u90ae\u4ef6\u53d1\u653e x").append(mailed);
+            }
+            if (dropped > 0) {
+                msg.append("\uff0c\u5730\u9762\u6389\u843d x").append(dropped);
+            }
+            msg.append("\u3002");
+            player.sendMessage(msg.toString());
         }
     }
 }

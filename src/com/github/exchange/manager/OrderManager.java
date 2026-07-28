@@ -14,6 +14,7 @@ import com.github.exchange.model.ItemStatus;
 import com.github.exchange.model.Order;
 import com.github.exchange.model.Trade;
 import com.github.exchange.util.EconomyUtil;
+import com.github.exchange.util.InventoryDelivery;
 import com.github.exchange.util.ItemSerializer;
 import com.github.exchange.util.MarketGuiItem;
 import com.github.exchange.util.TaxCalculator;
@@ -605,18 +606,29 @@ public class OrderManager {
             this.plugin.getStorageManager().addToPlayerItemWarehouse(buyerUuid.toString(), exchangeItem.getItemBase64(), quantity);
             return;
         }
-        int maxStack = Math.max(1, baseItem.getMaxStackSize());
-        for (int chunkAmount : DeliveryPlan.chunks(quantity, maxStack)) {
-            ItemStack giveStack = baseItem.clone();
-            giveStack.setAmount(chunkAmount);
-            for (ItemStack leftover : buyer.getInventory().addItem(new ItemStack[]{giveStack}).values()) {
-                if (leftover == null) {
-                    continue;
+        int added = InventoryDelivery.addUpTo(buyer, baseItem, quantity);
+        int remaining = quantity - added;
+        if (remaining > 0) {
+            ItemStack leftoverStack = baseItem.clone();
+            leftoverStack.setAmount(remaining);
+            boolean mailed = this.plugin.sendItemsAsMail(buyer, exchangeItem.getDisplayName(), leftoverStack);
+            if (mailed) {
+                if (added > 0) {
+                    buyer.sendMessage("\u00a7a\u4f60\u5df2\u83b7\u5f97 " + exchangeItem.getDisplayName() + " x" + added + "\uff0c\u5269\u4f59 x" + remaining + " \u56e0\u80cc\u5305\u5df2\u6ee1\u5df2\u8f6c\u4e3a\u90ae\u4ef6\u53d1\u653e\u3002");
+                } else {
+                    buyer.sendMessage("\u00a7a\u80cc\u5305\u5df2\u6ee1\uff0c" + exchangeItem.getDisplayName() + " x" + remaining + " \u5df2\u8f6c\u4e3a\u90ae\u4ef6\u53d1\u653e\u3002");
                 }
-                buyer.getWorld().dropItemNaturally(buyer.getLocation(), leftover);
+            } else {
+                buyer.getWorld().dropItemNaturally(buyer.getLocation(), leftoverStack);
+                if (added > 0) {
+                    buyer.sendMessage("\u00a7a\u4f60\u5df2\u83b7\u5f97 " + exchangeItem.getDisplayName() + " x" + added + "\uff0c\u5269\u4f59 x" + remaining + " \u56e0\u80cc\u5305\u5df2\u6ee1\u5df2\u6389\u843d\u5728\u5730\u3002");
+                } else {
+                    buyer.sendMessage("\u00a7a\u80cc\u5305\u5df2\u6ee1\uff0c" + exchangeItem.getDisplayName() + " x" + remaining + " \u5df2\u6389\u843d\u5728\u5730\u3002");
+                }
             }
+        } else {
+            buyer.sendMessage("\u00a7a\u4f60\u5df2\u83b7\u5f97 " + exchangeItem.getDisplayName() + " x" + quantity + "\u3002");
         }
-        buyer.sendMessage("\u00a7a\u4f60\u5df2\u83b7\u5f97 " + exchangeItem.getDisplayName() + " x" + quantity + "\u3002");
     }
 
     private void deliverMatchedMoney(UUID sellerUuid, BigDecimal amount) {

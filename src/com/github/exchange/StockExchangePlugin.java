@@ -33,6 +33,7 @@ import com.github.exchange.storage.StorageManager;
 import com.github.exchange.util.EconomyUtil;
 import com.github.exchange.util.TaxCalculator;
 import java.math.BigDecimal;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.ArrayList;
 import java.util.List;
@@ -52,6 +53,7 @@ import org.bukkit.plugin.Plugin;
 import org.bukkit.plugin.RegisteredServiceProvider;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.geysermc.floodgate.api.FloodgateApi;
+import cn.gmzc.mail.MailService;
 
 public class StockExchangePlugin
 extends JavaPlugin {
@@ -85,6 +87,8 @@ extends JavaPlugin {
     private String currencyName;
     private BukkitTask marketCleanupTask;
     private final List<String> announcements = new ArrayList<String>();
+    private MailService mailService;
+
 
     public void onEnable() {
         instance = this;
@@ -513,6 +517,59 @@ extends JavaPlugin {
     private void returnItem(Player player, ItemStack item) {
         for (ItemStack leftover : player.getInventory().addItem(item).values()) {
             player.getWorld().dropItemNaturally(player.getLocation(), leftover);
+        }
+    }
+
+    /**
+     * Gets the GMZCMail service if available.
+     */
+    public MailService getMailService() {
+        if (this.mailService != null) {
+            return this.mailService;
+        }
+        Plugin mailPlugin = this.getServer().getPluginManager().getPlugin("GMZCMail");
+        if (mailPlugin == null || !mailPlugin.isEnabled()) {
+            return null;
+        }
+        try {
+            RegisteredServiceProvider<MailService> registration =
+                this.getServer().getServicesManager().getRegistration(MailService.class);
+            if (registration != null) {
+                this.mailService = registration.getProvider();
+            }
+        } catch (Throwable t) {
+            this.getLogger().warning("Failed to get MailService: " + t.getMessage());
+        }
+        return this.mailService;
+    }
+
+    /**
+     * Sends items to a player via GMZCMail if available.
+     * Must be called from the main thread.
+     *
+     * @return true if the items were mailed successfully, false otherwise
+     */
+    public boolean sendItemsAsMail(Player player, String displayName, ItemStack items) {
+        if (player == null || items == null || items.getAmount() <= 0) {
+            return false;
+        }
+        MailService mail = this.getMailService();
+        if (mail == null) {
+            return false;
+        }
+        try {
+            mail.sendSystemMail(
+                "\u00a76\u4ea4\u6613\u6240\u7cfb\u7edf",
+                player.getUniqueId(),
+                player.getName(),
+                "\u00a7a\u60a8\u7684\u80cc\u5305\u5df2\u6ee1\uff0c\u7269\u54c1 "
+                    + displayName + " x" + items.getAmount() + " \u5df2\u8f6c\u4e3a\u90ae\u4ef6\u53d1\u653e\u3002",
+                Collections.singletonList(items.clone())
+            );
+            return true;
+        } catch (Throwable t) {
+            this.getLogger().warning("Failed to send items via mail: " + t.getMessage());
+            return false;
         }
     }
 }
