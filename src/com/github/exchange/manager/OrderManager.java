@@ -248,6 +248,88 @@ public class OrderManager {
         return "\u00a7a\u5df2\u8d2d\u4e70 " + exchangeItem.getDisplayName() + " x" + quantity + "\uff0c\u6210\u4ea4\u4ef7: " + sellOrder.getPrice();
     }
 
+    public synchronized String directSellToBuyOrder(Player player, int buyOrderId, int quantity) {
+        if (player == null) {
+            return "\u00a7c\u53ea\u6709\u73a9\u5bb6\u53ef\u4ee5\u51fa\u552e\u7269\u54c1\u3002";
+        }
+        if (quantity <= 0) {
+            return "\u00a7c\u6570\u91cf\u5fc5\u987b\u5927\u4e8e0\u3002";
+        }
+        Order buyOrder = this.plugin.getStorageManager().getOrder(buyOrderId);
+        if (buyOrder == null || buyOrder.getOrderType() != Order.OrderType.BUY || !buyOrder.isActive()) {
+            return "\u00a7c\u8be5\u6c42\u8d2d\u5355\u5df2\u4e0d\u53ef\u7528\u3002";
+        }
+        if (buyOrder.getPlayerUuid().equals(player.getUniqueId().toString())) {
+            return "\u00a7c\u4e0d\u80fd\u51fa\u552e\u7ed9\u81ea\u5df1\u7684\u6c42\u8d2d\u5355\u3002";
+        }
+        if (buyOrder.getRemainingQty() < quantity) {
+            return "\u00a7c\u8be5\u6c42\u8d2d\u5355\u5269\u4f59\u6570\u91cf\u4e0d\u8db3\u3002";
+        }
+        ExchangeItem exchangeItem = this.plugin.getItemManager().getItem(buyOrder.getItemId());
+        if (exchangeItem == null) {
+            return "\u00a7c\u8be5\u5546\u54c1\u54c1\u79cd\u4e0d\u5b58\u5728\u3002";
+        }
+        ItemStack itemStack = ItemSerializer.itemFromBase64(exchangeItem.getItemBase64());
+        if (itemStack == null) {
+            return "\u00a7c\u7269\u54c1\u53cd\u5e8f\u5217\u5316\u5931\u8d25\u3002";
+        }
+        int beforeCount = this.countSimilarItems(player, itemStack);
+        if (beforeCount < quantity) {
+            return "\u00a7c\u80cc\u5305\u4e2d\u6ca1\u6709\u8db3\u591f\u7684\u7269\u54c1\u3002";
+        }
+        InventoryRemoval removal = this.removeSimilarItems(player, itemStack, quantity);
+        if (removal == null) {
+            return "\u00a7c\u7269\u54c1\u79fb\u9664\u5931\u8d25\uff0c\u8bf7\u91cd\u8bd5\u3002";
+        }
+        int afterCount = this.countSimilarItems(player, itemStack);
+        if (afterCount != beforeCount - quantity) {
+            removal.rollback();
+            return "\u00a7c\u7269\u54c1\u79fb\u9664\u5931\u8d25\uff0c\u8bf7\u91cd\u8bd5\u3002";
+        }
+        Order sellOrder = new Order();
+        sellOrder.setOrderType(Order.OrderType.SELL);
+        sellOrder.setItemId(exchangeItem.getId());
+        sellOrder.setPlayerUuid(player.getUniqueId().toString());
+        sellOrder.setPlayerName(player.getName());
+        sellOrder.setPrice(buyOrder.getPrice());
+        sellOrder.setQuantity(quantity);
+        sellOrder.setFilledQty(0);
+        sellOrder.setStatus(Order.OrderStatus.OPEN);
+        sellOrder.setCreatedAt(new Timestamp(System.currentTimeMillis()));
+        sellOrder.setUpdatedAt(new Timestamp(System.currentTimeMillis()));
+        int sellOrderId = this.plugin.getStorageManager().insertOrder(sellOrder);
+        if (sellOrderId <= 0) {
+            removal.rollback();
+            return "\u00a7c\u521b\u5efa\u5356\u5355\u5931\u8d25\uff0c\u8bf7\u91cd\u8bd5\u3002";
+        }
+        sellOrder.setId(sellOrderId);
+        EscrowEntry escrow = new EscrowEntry();
+        escrow.setOrderId(sellOrderId);
+        escrow.setPlayerUuid(player.getUniqueId().toString());
+        escrow.setAssetType(EscrowEntry.AssetType.ITEM);
+        escrow.setAmount(BigDecimal.ZERO);
+        escrow.setItemBase64(exchangeItem.getItemBase64());
+        escrow.setQuantity(quantity);
+        this.plugin.getStorageManager().insertEscrow(escrow);
+        EscrowEntry storedEscrow = this.plugin.getStorageManager().getEscrow(sellOrderId, EscrowEntry.AssetType.ITEM);
+        if (!this.isValidSellEscrow(sellOrder, storedEscrow)) {
+            sellOrder.setStatus(Order.OrderStatus.CANCELLED);
+            this.plugin.getStorageManager().updateOrder(sellOrder);
+            this.plugin.getStorageManager().deleteEscrow(sellOrderId, EscrowEntry.AssetType.ITEM);
+            removal.rollback();
+            this.plugin.getLogger().severe("[AssetAudit] SELL_TO_BUY_ABORT player=" + player.getUniqueId()
+                + " sellOrder=" + sellOrderId + " buyOrder=" + buyOrderId + " item=" + exchangeItem.getId()
+                + " quantity=" + quantity + " reason=escrow_verification_failed");
+            return "\u00a7c\u6258\u7ba1\u5199\u5165\u5931\u8d25\uff0c\u7269\u54c1\u5df2\u539f\u69fd\u4f4d\u6062\u590d\u3002";
+        }
+        this.plugin.getLogger().info("[AssetAudit] SELL_TO_BUY player=" + player.getUniqueId()
+            + " sellOrder=" + sellOrderId + " buyOrder=" + buyOrderId + " item=" + exchangeItem.getId()
+            + " removed=" + removal.removedQuantity() + " escrow=" + storedEscrow.getQuantity());
+        this.executeMatch(buyOrder, sellOrder, quantity);
+        this.refreshLowestSellStatus(exchangeItem.getId());
+        return "\u00a7a\u5df2\u51fa\u552e " + exchangeItem.getDisplayName() + " x" + quantity + "\uff0c\u6210\u4ea4\u4ef7: " + buyOrder.getPrice();
+    }
+
     public synchronized String marketSell(Player player, ExchangeItem exchangeItem, int quantity) {
         BigDecimal marketPrice;
         if (quantity <= 0) {
@@ -746,6 +828,14 @@ public class OrderManager {
             return null;
         }
         return sellOrders.get(0).getPrice();
+    }
+
+    public BigDecimal getHighestBuyPrice(int itemId) {
+        List<Order> buyOrders = this.getActiveOrders(itemId, Order.OrderType.BUY);
+        if (buyOrders.isEmpty()) {
+            return null;
+        }
+        return buyOrders.get(0).getPrice();
     }
 
     public List<PriceLevel> getAggregatedPriceLevels(int itemId, Order.OrderType type) {

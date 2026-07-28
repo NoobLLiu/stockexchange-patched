@@ -450,7 +450,7 @@ implements Listener {
         sellOrders.sort(Comparator.comparing(Order::getPrice).thenComparing(Order::getCreatedAt));
         int slot = 0;
         for (MarketListingLayout.Slot listingSlot : MarketListingLayout.expand(sellOrders)) {
-            if (slot >= 45) {
+            if (slot >= 18) {
                 break;
             }
             Order sellOrder = listingSlot.order();
@@ -480,12 +480,50 @@ implements Listener {
             inv.setItem(slot++, displayItem);
         }
         ItemStack glass = ExchangeGUI.createItem(new ItemStack(Material.GRAY_STAINED_GLASS_PANE), "\u00a77", new String[]{null});
-        for (int s = 46; s <= 50; ++s) {
+        inv.setItem(18, ExchangeGUI.createItem(new ItemStack(Material.ORANGE_STAINED_GLASS_PANE), "\u00a76--- \u00a7c\u6c42\u8d2d\u5355 \u00a77(\u70b9\u51fb\u4e0a\u67b6\u7ed9\u8be5\u4e70\u5bb6) ---", new String[]{null}));
+        List<Order> buyOrders = new ArrayList<Order>(plugin.getOrderManager().getActiveOrders(item.getId(), Order.OrderType.BUY));
+        buyOrders.sort(Comparator.comparing(Order::getPrice).reversed().thenComparing(Order::getCreatedAt));
+        int buySlot = 19;
+        for (Order buyOrder : buyOrders) {
+            if (buySlot > 36) {
+                break;
+            }
+            int displayedQuantity = Math.min(buyOrder.getRemainingQty(), MarketListingLayout.MAX_DISPLAY_AMOUNT);
+            ItemStack displayItem = ExchangeGUI.createMarketVoucher(baseItem, itemDisplayName);
+            ExchangeGUI.setDisplayAmount(displayItem, displayedQuantity);
+            ItemMeta meta = displayItem.getItemMeta();
+            if (meta != null) {
+                ArrayList<String> lore = new ArrayList<String>();
+                lore.add("\u00a77\u7269\u54c1: \u00a7f" + itemDisplayName);
+                lore.add("\u00a77\u4e70\u5bb6: \u00a7f" + buyOrder.getPlayerName());
+                lore.add("\u00a77\u6c42\u8d2d\u4ef7: \u00a7f" + ExchangeGUI.formatPrice(buyOrder.getPrice()));
+                lore.add("\u00a77\u8fd9\u683c\u6570\u91cf: \u00a7f" + displayedQuantity);
+                lore.add("\u00a77\u8be5\u6c42\u8d2d\u5355\u5269\u4f59: \u00a7f" + buyOrder.getRemainingQty());
+                lore.add("");
+                if (buyOrder.getPlayerUuid().equals(player.getUniqueId().toString())) {
+                    lore.add("\u00a7e\u70b9\u51fb\u53d6\u6d88\u8be5\u6c42\u8d2d\u5355");
+                } else if (bulk) {
+                    lore.add("\u00a7e\u70b9\u51fb\u51fa\u552e " + displayedQuantity + " \u4e2a");
+                } else {
+                    lore.add("\u00a7e\u70b9\u51fb\u51fa\u552e 1 \u4e2a");
+                }
+                lore.add("\u00a70ORDER:" + buyOrder.getId());
+                meta.setLore(lore);
+                displayItem.setItemMeta(meta);
+            }
+            inv.setItem(buySlot++, displayItem);
+        }
+        for (int s = 37; s <= 44; ++s) {
             inv.setItem(s, glass);
         }
+        for (int s = 46; s <= 48; ++s) {
+            inv.setItem(s, glass);
+        }
+        inv.setItem(50, glass);
         String modeText = bulk ? "\u00a7c\u6279\u91cf\u8d2d\u4e70" : "\u00a7a\u5355\u4e2a\u8d2d\u4e70";
-        String modeHint = bulk ? "\u00a77\u70b9\u51fb\u683c\u5b50\u8d2d\u4e70\u5168\u90e8" : "\u00a77\u70b9\u51fb\u8d2d\u4e70 1 \u4e2a";
+        String modeHint = bulk ? "\u00a77\u70b9\u51fb\u683c\u5b50\u8d2d\u4e70/\u51fa\u552e\u5168\u90e8" : "\u00a77\u70b9\u51fb\u8d2d\u4e70/\u51fa\u552e 1 \u4e2a";
         inv.setItem(45, ExchangeGUI.createItem(Material.HOPPER, "\u00a7e\u5207\u6362\u8d2d\u4e70\u6a21\u5f0f \u00a77| " + modeText, modeHint));
+        inv.setItem(49, ExchangeGUI.createItem(Material.REDSTONE, "\u00a7b\u6c42\u8d2d\u8be5\u7269\u54c1", "\u00a77\u8f93\u5165\u4ef7\u683c\u548c\u6570\u91cf\u53d1\u8d77\u6c42\u8d2d\u5355"));
         inv.setItem(51, ExchangeGUI.createItem(Material.GLOWSTONE_DUST, "\u00a76\u5feb\u901f\u4e0a\u67b6", "\u00a77\u4e00\u952e\u6309\u6700\u4f4e\u4ef7\u4e0a\u67b6\u80cc\u5305\u4e2d\u6240\u6709\u540c\u7c7b\u578b\u5546\u54c1"));
         inv.setItem(LARGE_NEXT_SLOT, ExchangeGUI.createItem(Material.EMERALD_BLOCK, "\u00a7a\u4e0a\u67b6\u8be5\u7269\u54c1", "\u00a77\u8f93\u5165\u4ef7\u683c\u548c\u6570\u91cf\u8fdb\u884c\u4e0a\u67b6"));
         inv.setItem(LARGE_BACK_SLOT, ExchangeGUI.createItem(Material.ARROW, BACK_TO_PREVIOUS, "\u00a77\u8fd4\u56de\u54c1\u79cd\u5217\u8868"));
@@ -871,6 +909,13 @@ implements Listener {
                     ExchangeGUI.openItemList(plugin, clicker, guiPage.getOrDefault(uuid, 1));
                     break;
                 }
+                if (displayName.contains("\u6c42\u8d2d\u8be5\u7269\u54c1")) {
+                    ExchangeItem buyItem;
+                    Integer buyId = guiItemId.get(uuid);
+                    if (buyId == null || (buyItem = plugin.getItemManager().getItem(buyId)) == null) break;
+                    plugin.getChatInputHandler().startBuyInput(clicker, buyItem);
+                    break;
+                }
                 if (displayName.contains("\u4e0a\u67b6\u8be5\u7269\u54c1")) {
                     ExchangeItem item3;
                     Integer id3 = guiItemId.get(uuid);
@@ -911,8 +956,13 @@ implements Listener {
                             clicker.sendMessage(result);
                         } else {
                             boolean bulk = bulkBuyMode.getOrDefault(uuid, false);
-                            int buyQty = bulk ? ExchangeGUI.readDisplayedQuantity(meta) : 1;
-                            String result = plugin.getOrderManager().directBuyFromSellOrder(clicker, orderId, buyQty);
+                            int qty = bulk ? ExchangeGUI.readDisplayedQuantity(meta) : 1;
+                            String result;
+                            if (clickedOrder.getOrderType() == Order.OrderType.BUY) {
+                                result = plugin.getOrderManager().directSellToBuyOrder(clicker, orderId, qty);
+                            } else {
+                                result = plugin.getOrderManager().directBuyFromSellOrder(clicker, orderId, qty);
+                            }
                             clicker.sendMessage(result);
                         }
                         Integer currentItemId = guiItemId.get(uuid);
@@ -1194,6 +1244,7 @@ implements Listener {
         if (name.contains("\u5207\u6362\u8d2d\u4e70\u6a21\u5f0f")) return 2400019;
         if (name.contains("\u4e00\u952e\u63d0\u53d6") || name.contains("\u4ed3\u5e93\u91d1\u5e01")) return 2400045;
         if (name.contains("\u4e70\u5356") || name.contains("\u4ea4\u6613")) return 2400047;
+        if (name.contains("\u6c42\u8d2d")) return 2400047;
         return null;
     }
 

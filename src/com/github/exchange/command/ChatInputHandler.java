@@ -63,6 +63,10 @@ implements Listener {
         this.startInput(player, exchangeItem, "sell");
     }
 
+    public void startBuyInput(Player player, ExchangeItem exchangeItem) {
+        this.startInput(player, exchangeItem, "buy");
+    }
+
     public void startMarketBuyInput(Player player, ExchangeItem exchangeItem) {
         if (this.plugin.isBedrockPlayer(player)) {
             this.openBedrockQuantityForm(player, exchangeItem, "market_buy", null);
