@@ -1375,14 +1375,18 @@ implements Listener {
     private static boolean matchesCatalogSearch(StockExchangePlugin plugin, ExchangeItem item, String query) {
         ItemStack baseItem = ItemSerializer.itemFromBase64(item.getItemBase64());
         String resolvedName = baseItem == null ? item.getDisplayName() : ExchangeGUI.resolveDisplayName(item, baseItem);
+        String keyName = baseItem == null ? "" : baseItem.getType().getKey().getKey();
+        String typeName = baseItem == null ? "" : baseItem.getType().name();
         String material = item.getMaterial();
         if (baseItem != null) {
-            material = material == null
-                ? baseItem.getType().getKey().toString()
-                : material + " " + baseItem.getType().name() + " " + baseItem.getType().getKey();
+            if (material == null) {
+                material = baseItem.getType().getKey().toString();
+            } else {
+                material = material + " " + typeName + " " + baseItem.getType().getKey();
+            }
         }
-        return MarketListingSearch.matches(query, item.getId(), resolvedName, item.getItemName(), material)
-            || MarketListingSearch.matches(query, item.getId(), item.getDisplayName(), null, null);
+        return MarketListingSearch.matches(query, item.getId(), resolvedName, item.getItemName(), material, keyName, typeName)
+            || MarketListingSearch.matches(query, item.getId(), item.getDisplayName(), null, null, null, null);
     }
 
     private static String safeQueryForDisplay(String query) {

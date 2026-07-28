@@ -16,7 +16,9 @@ public final class MarketListingSearch {
         int itemId,
         String displayName,
         String itemName,
-        String material
+        String material,
+        String keyName,
+        String typeName
     ) {
         String keyword = normalize(query);
         if (keyword.isEmpty()) {
@@ -25,7 +27,9 @@ public final class MarketListingSearch {
         return contains(itemId, keyword)
             || contains(displayName, keyword)
             || contains(itemName, keyword)
-            || contains(material, keyword);
+            || contains(material, keyword)
+            || contains(keyName, keyword)
+            || contains(typeName, keyword);
     }
 
     static String normalize(String value) {

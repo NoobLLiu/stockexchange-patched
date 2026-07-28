@@ -125,9 +125,12 @@ implements Listener {
             String trimmed = query.trim();
             com.github.exchange.model.ExchangeItem matched = null;
             for (com.github.exchange.model.ExchangeItem item : this.plugin.getItemManager().getAllItems()) {
+                org.bukkit.inventory.ItemStack candidateItem = com.github.exchange.util.ItemSerializer.itemFromBase64(item.getItemBase64());
                 if (com.github.exchange.gui.MarketListingSearch.matches(trimmed, item.getId(), 
-                        com.github.exchange.util.ItemDisplayNames.resolve(com.github.exchange.util.ItemSerializer.itemFromBase64(item.getItemBase64())),
-                        item.getItemName(), item.getMaterial())) {
+                        com.github.exchange.util.ItemDisplayNames.resolve(candidateItem),
+                        item.getItemName(), item.getMaterial(),
+                        candidateItem == null ? null : candidateItem.getType().getKey().getKey(),
+                        candidateItem == null ? null : candidateItem.getType().name())) {
                     matched = item;
                     break;
                 }
@@ -164,9 +167,12 @@ implements Listener {
                 String trimmed = query.trim();
                 com.github.exchange.model.ExchangeItem matched = null;
                 for (com.github.exchange.model.ExchangeItem item : this.plugin.getItemManager().getAllItems()) {
+                    org.bukkit.inventory.ItemStack candidateItem = com.github.exchange.util.ItemSerializer.itemFromBase64(item.getItemBase64());
                     if (com.github.exchange.gui.MarketListingSearch.matches(trimmed, item.getId(),
-                            com.github.exchange.util.ItemDisplayNames.resolve(com.github.exchange.util.ItemSerializer.itemFromBase64(item.getItemBase64())),
-                            item.getItemName(), item.getMaterial())) {
+                            com.github.exchange.util.ItemDisplayNames.resolve(candidateItem),
+                            item.getItemName(), item.getMaterial(),
+                            candidateItem == null ? null : candidateItem.getType().getKey().getKey(),
+                            candidateItem == null ? null : candidateItem.getType().name())) {
                         matched = item;
                         break;
                     }
