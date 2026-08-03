@@ -1,12 +1,14 @@
 package com.github.exchange.command;
 
 import com.github.exchange.StockExchangePlugin;
+import com.github.exchange.web.WebMarketManager;
 import com.github.exchange.gui.ExchangeGUI;
 import com.github.exchange.manager.ItemManager;
 import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
 import java.util.stream.Collectors;
 import org.bukkit.Material;
 import org.bukkit.command.Command;
@@ -27,7 +29,11 @@ public class ExchangeCommand implements CommandExecutor, TabCompleter {
         "reload",
         "reconnectdb",
         "announce",
-        "announcements"
+        "announcements",
+        "deposit",
+        "depositmoney",
+        "withdraw",
+        "withdrawmoney"
     );
 
     private final StockExchangePlugin plugin;
@@ -70,6 +76,14 @@ public class ExchangeCommand implements CommandExecutor, TabCompleter {
                 return this.handleReconnectDb(sender);
             case "announce":
                 return this.handleAnnounce(sender, args);
+            case "deposit":
+                return this.handleDeposit(sender, args);
+            case "depositmoney":
+                return this.handleDepositMoney(sender, args);
+            case "withdraw":
+                return this.handleWithdraw(sender, args);
+            case "withdrawmoney":
+                return this.handleWithdrawMoney(sender, args);
             case "announcements":
                 return this.handleAnnouncements(sender);
             default:
@@ -363,6 +377,67 @@ public class ExchangeCommand implements CommandExecutor, TabCompleter {
         for (int i = 0; i < announcements.size(); ++i) {
             sender.sendMessage("\u00a7e#" + (i + 1) + " \u00a7f" + announcements.get(i));
         }
+        return true;
+    }
+
+
+    private boolean handleDeposit(CommandSender sender, String[] args) {
+        if (!(sender instanceof Player)) {
+            sender.sendMessage("\u00a7c\u53ea\u6709\u73a9\u5bb6\u53ef\u4ee5\u5b58\u5165\u4ed3\u5e93\u3002");
+            return true;
+        }
+        int quantity = 1;
+        if (args.length >= 2) {
+            try {
+                quantity = Integer.parseInt(args[1]);
+            } catch (NumberFormatException e) {
+                sender.sendMessage("\u00a7c\u65e0\u6548\u7684\u6570\u91cf\u3002");
+                return true;
+            }
+        }
+        Map<String, Object> result = this.plugin.getWebMarketManager().depositItems((Player) sender, quantity);
+        sender.sendMessage(Boolean.TRUE.equals(result.get("ok"))
+            ? "\u00a7a\u5df2\u5c06\u7269\u54c1\u5b58\u5165\u4e2a\u4eba\u7269\u54c1\u4ed3\u5e93 x" + quantity
+            : "\u00a7c" + result.get("message"));
+        return true;
+    }
+
+    private boolean handleDepositMoney(CommandSender sender, String[] args) {
+        if (!(sender instanceof Player)) {
+            sender.sendMessage("\u00a7c\u53ea\u6709\u73a9\u5bb6\u53ef\u4ee5\u5b58\u5165\u8d27\u5e01\u4ed3\u5e93\u3002");
+            return true;
+        }
+        if (args.length < 2) {
+            sender.sendMessage("\u00a7c\u7528\u6cd5: /se depositmoney <\u91d1\u989d>");
+            return true;
+        }
+        try {
+            BigDecimal amount = new BigDecimal(args[1]);
+            Map<String, Object> result = this.plugin.getWebMarketManager().depositMoney((Player) sender, amount);
+            sender.sendMessage(Boolean.TRUE.equals(result.get("ok"))
+                ? "\u00a7a\u5df2\u5b58\u5165\u8d27\u5e01\u4ed3\u5e93 " + amount.toPlainString()
+                : "\u00a7c" + result.get("message"));
+        } catch (NumberFormatException e) {
+            sender.sendMessage("\u00a7c\u65e0\u6548\u7684\u91d1\u989d\u3002");
+        }
+        return true;
+    }
+
+    private boolean handleWithdraw(CommandSender sender, String[] args) {
+        if (!(sender instanceof Player)) {
+            sender.sendMessage("\u00a7c\u53ea\u6709\u73a9\u5bb6\u53ef\u4ee5\u63d0\u53d6\u3002");
+            return true;
+        }
+        this.plugin.getStorageManager().withdrawWarehouse((Player) sender);
+        return true;
+    }
+
+    private boolean handleWithdrawMoney(CommandSender sender, String[] args) {
+        if (!(sender instanceof Player)) {
+            sender.sendMessage("\u00a7c\u53ea\u6709\u73a9\u5bb6\u53ef\u4ee5\u63d0\u53d6\u3002");
+            return true;
+        }
+        this.plugin.getStorageManager().withdrawWarehouseMoney((Player) sender);
         return true;
     }
 

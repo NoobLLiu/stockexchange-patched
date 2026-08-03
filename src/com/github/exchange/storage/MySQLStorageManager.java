@@ -662,6 +662,16 @@ implements StorageManager {
     }
 
     @Override
+    public List<Trade> getAllTrades(int limit) {
+        ArrayList<Trade> result = new ArrayList<Trade>(this.tradeCache.values());
+        result.sort((a, b) -> Long.compare(b.getTradedAt().getTime(), a.getTradedAt().getTime()));
+        if (limit > 0 && result.size() > limit) {
+            return new ArrayList<Trade>(result.subList(0, limit));
+        }
+        return result;
+    }
+
+    @Override
     public Trade getLastTrade(int itemId) {
         if (!this.prepareForOperation(true)) {
             return null;

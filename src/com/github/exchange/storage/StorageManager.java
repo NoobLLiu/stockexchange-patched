@@ -50,6 +50,8 @@ public interface StorageManager {
 
     public List<Trade> getTradesByItem(int var1, int var2);
 
+    public List<Trade> getAllTrades(int limit);
+
     public Trade getLastTrade(int var1);
 
     public Trade getFirstTradeOfDate(int var1, LocalDate var2);

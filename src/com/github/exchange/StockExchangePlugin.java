@@ -33,6 +33,7 @@ import com.github.exchange.storage.StorageManager;
 import com.github.exchange.util.EconomyUtil;
 import com.github.exchange.util.ItemDatabase;
 import com.github.exchange.util.TaxCalculator;
+import com.github.exchange.web.WebMarketManager;
 import java.math.BigDecimal;
 import java.util.Collections;
 import java.util.HashMap;
@@ -66,6 +67,7 @@ extends JavaPlugin {
     private OrderManager orderManager;
     private TradeManager tradeManager;
     private EscrowManager escrowManager;
+    private WebMarketManager webMarketManager;
     private ChatInputHandler chatInputHandler;
     private ItemDatabase itemDatabase;
     private boolean storageAvailable = true;
@@ -119,6 +121,7 @@ extends JavaPlugin {
         this.orderManager = new OrderManager(this);
         this.tradeManager = new TradeManager(this);
         this.escrowManager = new EscrowManager(this);
+        this.webMarketManager = new WebMarketManager(this);
         this.chatInputHandler = new ChatInputHandler(this);
         this.itemDatabase = new ItemDatabase(this.getLogger());
         ExchangeCommand exchangeCmd = new ExchangeCommand(this);
@@ -324,6 +327,10 @@ extends JavaPlugin {
 
     public TradeManager getTradeManager() {
         return this.tradeManager;
+    }
+
+    public WebMarketManager getWebMarketManager() {
+        return this.webMarketManager;
     }
 
     public EscrowManager getEscrowManager() {
