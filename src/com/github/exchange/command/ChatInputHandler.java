@@ -39,6 +39,9 @@ implements Listener {
     }
 
     public void startInput(Player player, ExchangeItem exchangeItem, String action) {
+        if (this.plugin.denyGrowthAccess(player)) {
+            return;
+        }
         if (this.plugin.isBedrockPlayer(player)) {
             this.openBedrockPriceQuantityForm(player, exchangeItem, action);
             return;
@@ -71,7 +74,35 @@ implements Listener {
         this.startInput(player, exchangeItem, "buy");
     }
 
+    public void startListingInput(Player player) {
+        if (this.plugin.denyGrowthAccess(player)) {
+            return;
+        }
+        ExchangeGUI.enterListingPriceInput(player);
+        if (this.plugin.isBedrockPlayer(player)) {
+            this.openBedrockListingPriceForm(player);
+            return;
+        }
+        player.closeInventory();
+        anvilInputGUI.openInput(player, "\u00a7a\u8f93\u5165\u5355\u4ef7", String.valueOf(this.plugin.getPriceTick()), priceText -> {
+            if (priceText == null || priceText.equalsIgnoreCase("cancel")) {
+                ExchangeGUI.cancelListing(this.plugin, player);
+                ExchangeGUI.openItemList(this.plugin, player);
+                return;
+            }
+            BigDecimal price = this.parsePrice(player, priceText);
+            if (price == null) {
+                this.startListingInput(player);
+                return;
+            }
+            ExchangeGUI.completeListing(this.plugin, player, price);
+        });
+    }
+
     public void startMarketBuyInput(Player player, ExchangeItem exchangeItem) {
+        if (this.plugin.denyGrowthAccess(player)) {
+            return;
+        }
         if (this.plugin.isBedrockPlayer(player)) {
             this.openBedrockQuantityForm(player, exchangeItem, "market_buy", null);
             return;
@@ -89,6 +120,9 @@ implements Listener {
     }
 
     public void startMarketSearchInput(Player player) {
+        if (this.plugin.denyGrowthAccess(player)) {
+            return;
+        }
         if (this.plugin.isBedrockPlayer(player)) {
             this.openBedrockMarketSearchForm(player);
             return;
@@ -146,6 +180,29 @@ implements Listener {
                 this.executeInput(player, exchangeItem, action, price, quantity);
             }));
 
+        FloodgateApi.getInstance().sendForm(player.getUniqueId(), builder);
+    }
+
+    private void openBedrockListingPriceForm(Player player) {
+        player.closeInventory();
+        CustomForm.Builder builder = CustomForm.builder()
+            .title("\u4e0a\u67b6\u5546\u54c1")
+            .input("\u5355\u4ef7\uff08\u6700\u5c0f\u5355\u4f4d: " + this.plugin.getPriceTick() + "）", "\u8bf7\u8f93\u5165\u6570\u5b57")
+            .validResultHandler(response -> Bukkit.getScheduler().runTask(this.plugin, () -> {
+                BigDecimal price = this.parsePrice(player, response.asInput(0));
+                if (price == null) {
+                    this.openBedrockListingPriceForm(player);
+                    return;
+                }
+                ExchangeGUI.completeListing(this.plugin, player, price);
+            }))
+            .closedResultHandler(() -> Bukkit.getScheduler().runTask(
+                this.plugin,
+                () -> {
+                    ExchangeGUI.cancelListing(this.plugin, player);
+                    ExchangeGUI.openItemList(this.plugin, player);
+                }
+            ));
         FloodgateApi.getInstance().sendForm(player.getUniqueId(), builder);
     }
 
@@ -227,44 +284,63 @@ implements Listener {
     }
 
     public void startAddItemSearchInput(Player player) {
+        this.startAddItemSearchInput(player, false);
+    }
+
+    public void startAddItemSearchInput(Player player, boolean buyOrder) {
+        if (this.plugin.denyGrowthAccess(player)) {
+            return;
+        }
         if (this.plugin.isBedrockPlayer(player)) {
-            this.openBedrockAddItemSearchForm(player);
+            this.openBedrockAddItemSearchForm(player, buyOrder);
             return;
         }
         player.closeInventory();
         anvilInputGUI.openInput(player, "\u00a7e\u641c\u7d22\u6dfb\u52a0", "\u8f93\u5165\u7269\u54c1\u540d\u79f0\u6216 ID", query -> {
             if (query == null) {
-                ExchangeGUI.openAddItemMenu(this.plugin, player);
+                this.reopenAddMenu(player, buyOrder);
                 return;
             }
             if (query.isBlank()) {
                 player.sendMessage("\u00a7e\u641c\u7d22\u5173\u952e\u8bcd\u4e0d\u80fd\u4e3a\u7a7a\u3002");
-                ExchangeGUI.openAddItemMenu(this.plugin, player);
+                this.reopenAddMenu(player, buyOrder);
                 return;
             }
             ItemDatabase.ItemEntry entry = this.plugin.getItemDatabase().search(query.trim());
             if (entry == null) {
                 player.sendMessage("\u00a7c\u672a\u627e\u5230\u5339\u914d\u7684\u7269\u54c1\uff1a" + query.trim());
-                ExchangeGUI.openAddItemMenu(this.plugin, player);
+                this.reopenAddMenu(player, buyOrder);
                 return;
             }
             org.bukkit.inventory.ItemStack baseItem = this.plugin.getItemDatabase().createItemStack(entry);
             if (baseItem == null) {
                 player.sendMessage("\u00a7c\u65e0\u6cd5\u521b\u5efa\u7269\u54c1\uff1a" + entry.getName() + " (" + entry.getId() + ")");
-                ExchangeGUI.openAddItemMenu(this.plugin, player);
+                this.reopenAddMenu(player, buyOrder);
                 return;
             }
             ItemManager.RegisterResult result = this.plugin.getItemManager().registerCatalogItem(player, baseItem);
             player.sendMessage(result.getMessage());
             if (result.isSuccess()) {
-                ExchangeGUI.openCatalogSearchResults(this.plugin, player, entry.getId(), 1);
+                if (buyOrder) {
+                    this.startBuyInput(player, result.getItem());
+                } else {
+                    ExchangeGUI.openItemList(this.plugin, player);
+                }
             } else {
-                ExchangeGUI.openAddItemMenu(this.plugin, player);
+                this.reopenAddMenu(player, buyOrder);
             }
         });
     }
 
-    private void openBedrockAddItemSearchForm(Player player) {
+    private void reopenAddMenu(Player player, boolean buyOrder) {
+        if (buyOrder) {
+            ExchangeGUI.openAddBuyItemMenu(this.plugin, player);
+        } else {
+            ExchangeGUI.openAddItemMenu(this.plugin, player);
+        }
+    }
+
+    private void openBedrockAddItemSearchForm(Player player, boolean buyOrder) {
         player.closeInventory();
         CustomForm.Builder builder = CustomForm.builder()
             .title("\u641c\u7d22\u6dfb\u52a0")
@@ -273,32 +349,36 @@ implements Listener {
                 String query = response.asInput(0);
                 if (query == null || query.isBlank()) {
                     player.sendMessage("\u00a7e\u641c\u7d22\u5173\u952e\u8bcd\u4e0d\u80fd\u4e3a\u7a7a\u3002");
-                    ExchangeGUI.openAddItemMenu(this.plugin, player);
+                    this.reopenAddMenu(player, buyOrder);
                     return;
                 }
                 ItemDatabase.ItemEntry entry = this.plugin.getItemDatabase().search(query.trim());
                 if (entry == null) {
                     player.sendMessage("\u00a7c\u672a\u627e\u5230\u5339\u914d\u7684\u7269\u54c1\uff1a" + query.trim());
-                    ExchangeGUI.openAddItemMenu(this.plugin, player);
+                    this.reopenAddMenu(player, buyOrder);
                     return;
                 }
                 ItemStack baseItem = this.plugin.getItemDatabase().createItemStack(entry);
                 if (baseItem == null) {
                     player.sendMessage("\u00a7c\u65e0\u6cd5\u521b\u5efa\u7269\u54c1\uff1a" + entry.getName() + " (" + entry.getId() + ")");
-                    ExchangeGUI.openAddItemMenu(this.plugin, player);
+                    this.reopenAddMenu(player, buyOrder);
                     return;
                 }
                 ItemManager.RegisterResult result = this.plugin.getItemManager().registerCatalogItem(player, baseItem);
                 player.sendMessage(result.getMessage());
                 if (result.isSuccess()) {
-                    ExchangeGUI.openCatalogSearchResults(this.plugin, player, entry.getId(), 1);
+                    if (buyOrder) {
+                        this.startBuyInput(player, result.getItem());
+                    } else {
+                        ExchangeGUI.openItemList(this.plugin, player);
+                    }
                 } else {
-                    ExchangeGUI.openAddItemMenu(this.plugin, player);
+                    this.reopenAddMenu(player, buyOrder);
                 }
             }))
             .closedResultHandler(() -> Bukkit.getScheduler().runTask(
                 this.plugin,
-                () -> ExchangeGUI.openAddItemMenu(this.plugin, player)
+                () -> this.reopenAddMenu(player, buyOrder)
             ));
         FloodgateApi.getInstance().sendForm(player.getUniqueId(), builder);
     }

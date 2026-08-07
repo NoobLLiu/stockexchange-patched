@@ -11,10 +11,14 @@ package com.github.exchange.util;
 import com.github.exchange.StockExchangePlugin;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 import java.util.stream.Collectors;
+import org.bukkit.Bukkit;
 import org.bukkit.enchantments.Enchantment;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.meta.ItemMeta;
@@ -30,6 +34,9 @@ public class ItemSerializer {
     }
 
     public static String itemToBase64(ItemStack item) {
+        if (item == null || item.getType() == org.bukkit.Material.AIR) {
+            return null;
+        }
         StockExchangePlugin p = ItemSerializer.getPlugin();
         if (p == null || p.getVersionAdapter() == null) {
             return null;
@@ -38,6 +45,9 @@ public class ItemSerializer {
     }
 
     public static ItemStack itemFromBase64(String base64) {
+        if (base64 == null || base64.isBlank()) {
+            return null;
+        }
         StockExchangePlugin p = ItemSerializer.getPlugin();
         if (p == null || p.getVersionAdapter() == null) {
             return null;
@@ -46,6 +56,9 @@ public class ItemSerializer {
     }
 
     public static String calculateNbtHash(ItemStack item) {
+        if (item == null || item.getType() == org.bukkit.Material.AIR) {
+            return "";
+        }
         String input;
         StringBuilder sb = new StringBuilder();
         ItemMeta meta = item.getItemMeta();
@@ -54,7 +67,7 @@ public class ItemSerializer {
         }
         if (meta != null && meta.hasLore()) {
             List<String> lore = meta.getLore();
-            String loreStr = lore.stream().collect(Collectors.joining("\n"));
+            String loreStr = lore == null ? "" : lore.stream().collect(Collectors.joining("\n"));
             sb.append("lore:").append(loreStr).append("|");
         }
         if (meta != null && meta.hasEnchants()) {
@@ -67,7 +80,7 @@ public class ItemSerializer {
         }
         try {
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
-            byte[] hash = digest.digest(input.getBytes());
+            byte[] hash = digest.digest(input.getBytes(StandardCharsets.UTF_8));
             StringBuilder hexString = new StringBuilder();
             for (byte b2 : hash) {
                 String hex = Integer.toHexString(0xFF & b2);
@@ -79,7 +92,9 @@ public class ItemSerializer {
             return hexString.toString();
         }
         catch (NoSuchAlgorithmException e2) {
-            e2.printStackTrace();
+            StockExchangePlugin plugin = ItemSerializer.getPlugin();
+            Logger logger = plugin == null ? Bukkit.getLogger() : plugin.getLogger();
+            logger.log(Level.WARNING, "SHA-256 is unavailable; using the legacy item hash fallback.", e2);
             return String.valueOf(input.hashCode());
         }
     }

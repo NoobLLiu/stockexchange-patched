@@ -34,9 +34,8 @@ gui:
 
 market:
   daily_register_limit: 5
-  auto_remove_empty_days: 2
   diamond_to_money_amount: 1000
   diamond_material: DIAMOND
-  currency_name: "暮球"
+  currency_name: "星光点"
 
 version: auto

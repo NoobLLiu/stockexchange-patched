@@ -13,16 +13,16 @@ public class EscrowManager {
         this.plugin = plugin;
     }
 
-    public void insertEscrow(EscrowEntry entry) {
-        this.plugin.getStorageManager().insertEscrow(entry);
+    public boolean insertEscrow(EscrowEntry entry) {
+        return this.plugin.getStorageManager().insertEscrow(entry);
     }
 
     public EscrowEntry getEscrow(int orderId, EscrowEntry.AssetType assetType) {
         return this.plugin.getStorageManager().getEscrow(orderId, assetType);
     }
 
-    public void deleteEscrow(int orderId, EscrowEntry.AssetType assetType) {
-        this.plugin.getStorageManager().deleteEscrow(orderId, assetType);
+    public boolean deleteEscrow(int orderId, EscrowEntry.AssetType assetType) {
+        return this.plugin.getStorageManager().deleteEscrow(orderId, assetType);
     }
 }
 

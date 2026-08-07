@@ -1,8 +1,9 @@
 $ErrorActionPreference = 'Stop'
 
 $projectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
-$serverRoot = Split-Path -Parent (Split-Path -Parent $projectRoot)
-$javaHome = 'C:\Program Files\Microsoft\jdk-25.0.3.9-hotspot'
+$devRoot = Split-Path -Parent (Split-Path -Parent $projectRoot)
+$serverRoot = Join-Path (Split-Path -Parent $devRoot) 'StarCIty'
+$javaHome = Join-Path $serverRoot 'runtime\jdk25\jdk-25.0.3'
 $buildRoot = Join-Path $projectRoot 'build'
 $pluginOut = Join-Path $buildRoot 'plugin-classes'
 $testOut = Join-Path $buildRoot 'test-classes'
@@ -10,63 +11,29 @@ $jarPath = Join-Path $buildRoot 'StockExchange-1.0.0-gmzc.jar'
 $sourcesList = Join-Path $buildRoot 'sources.txt'
 $testSourcesList = Join-Path $buildRoot 'test-sources.txt'
 
-$paperApi = 'C:\Users\BrianLiu\.m2\repository\io\papermc\paper\paper-api\1.21.11-R0.1-SNAPSHOT\paper-api-1.21.11-R0.1-SNAPSHOT.jar'
-$vaultJar = 'C:\Users\BrianLiu\.m2\repository\net\milkbowl\vault\VaultAPI\1.7\VaultAPI-1.7.jar'
-$floodgateJar = 'C:\Users\BrianLiu\.m2\repository\org\geysermc\floodgate\api\2.2.2-SNAPSHOT\api-2.2.2-SNAPSHOT.jar'
-$geyserJar = 'C:\Users\BrianLiu\.m2\repository\org\geysermc\geyser\common\2.2.1-SNAPSHOT\common-2.2.1-SNAPSHOT.jar'
-$cumulusJar = 'C:\Users\BrianLiu\.m2\repository\org\geysermc\cumulus\cumulus\1.1.2\cumulus-1.1.2.jar'
-$xconomyJar = Join-Path $serverRoot 'plugins\XConomy-Paper-2.26.3.jar'
-$mgactivitysJar = Join-Path $projectRoot 'build\MGActivitys-stub-1.0.0.jar'
-$gmzcmailJar = Join-Path $projectRoot '..\mail-system\build\GMZCMail-1.0.0.jar'
-
-$m2 = "$env:USERPROFILE\.m2\repository"
-$adventureApi = Join-Path $m2 'net\kyori\adventure-api\4.26.1\adventure-api-4.26.1.jar'
-$adventureKey = Join-Path $m2 'net\kyori\adventure-key\4.26.1\adventure-key-4.26.1.jar'
-$adventureNbt = Join-Path $m2 'net\kyori\adventure-nbt\4.26.1\adventure-nbt-4.26.1.jar'
-$examinationApi = Join-Path $m2 'net\kyori\examination-api\1.3.0\examination-api-1.3.0.jar'
-$examinationString = Join-Path $m2 'net\kyori\examination-string\1.3.0\examination-string-1.3.0.jar'
-$option = Join-Path $m2 'net\kyori\option\1.0.0\option-1.0.0.jar'
-$dataPackApi = Join-Path $m2 'io\papermc\paper\paper-api-data\1.21.11-R0.1-SNAPSHOT\paper-api-data-1.21.11-R0.1-SNAPSHOT.jar'
-$textSerializerGson = Join-Path $m2 'net\kyori\adventure-text-serializer-gson\4.26.1\adventure-text-serializer-gson-4.26.1.jar'
-$textSerializerLegacy = Join-Path $m2 'net\kyori\adventure-text-serializer-legacy\4.26.1\adventure-text-serializer-legacy-4.26.1.jar'
-$textSerializerPlain = Join-Path $m2 'net\kyori\adventure-text-serializer-plain\5.1.1\adventure-text-serializer-plain-5.1.1.jar'
-$bungeeChat = Join-Path $m2 'net\md-5\bungeecord-chat\1.21-R0.4\bungeecord-chat-1.21-R0.4.jar'
-$gson = Join-Path $m2 'com\google\code\gson\gson\2.10.1\gson-2.10.1.jar'
-$guava = Join-Path $m2 'com\google\guava\guava\33.3.0-jre\guava-33.3.0-jre.jar'
-$serverClassPathFile = Join-Path $serverRoot 'local-plugins\survival-return-fix\build\classpath.txt'
-
-$baseClassPath = $paperApi
-if (Test-Path -LiteralPath $serverClassPathFile) {
-    $rawClassPath = (Get-Content -LiteralPath $serverClassPathFile -Raw).Trim()
-    if ($rawClassPath) {
-        $rewrittenEntries = $rawClassPath -split ';' | ForEach-Object {
-            $entry = $_.Trim()
-            if (-not $entry) {
-                return $null
-            }
-            if (Test-Path -LiteralPath $entry) {
-                return $entry
-            }
-            if ($entry -match '^[A-Za-z]:\\.*?mc-server\\(.+)$') {
-                $candidate = Join-Path $serverRoot $Matches[1]
-                if (Test-Path -LiteralPath $candidate) {
-                    return $candidate
-                }
-            }
-            return $null
-        } | Where-Object { $_ }
-        if ($rewrittenEntries.Count -gt 0) {
-            $baseClassPath = ($rewrittenEntries -join ';')
-        }
-    }
-}
-
-$compileEntries = @($baseClassPath)
-foreach ($jar in @($vaultJar, $floodgateJar, $geyserJar, $cumulusJar, $xconomyJar, $mgactivitysJar, $gmzcmailJar, $adventureApi, $adventureKey, $adventureNbt, $examinationApi, $examinationString, $option, $dataPackApi, $textSerializerGson, $textSerializerLegacy, $textSerializerPlain, $bungeeChat, $gson, $guava)) {
+$paperApi = Join-Path $serverRoot 'libraries\io\papermc\paper\paper-api\1.21.11-R0.1-SNAPSHOT\paper-api-1.21.11-R0.1-SNAPSHOT.jar'
+$pluginRoot = Join-Path $serverRoot 'plugins'
+$vaultJar = Get-ChildItem -LiteralPath $pluginRoot -Filter '*Vault.jar' -File |
+    Select-Object -First 1 -ExpandProperty FullName
+$floodgateJar = Get-ChildItem -LiteralPath $pluginRoot -Filter '*Floodgate-Spigot.jar' -File |
+    Select-Object -First 1 -ExpandProperty FullName
+$geyserJar = Get-ChildItem -LiteralPath $pluginRoot -Filter '*Geyser-Spigot.jar' -File |
+    Select-Object -First 1 -ExpandProperty FullName
+$xconomyJar = Get-ChildItem -LiteralPath $pluginRoot -Filter '*XConomy*.jar' -File |
+    Select-Object -First 1 -ExpandProperty FullName
+$mgactivitysJar = Join-Path $devRoot 'local-plugins\mgactivitys\build\MGActivitys-1.0.0.jar'
+$gmzcmailJar = Join-Path $devRoot 'local-plugins\mail-system\build\GMZCMail-1.0.0.jar'
+$titleJar = Join-Path $devRoot 'local-plugins\title-system\build\GMZCTitles-1.0.0.jar'
+$gsonJar = Join-Path $serverRoot 'libraries\com\google\code\gson\gson\2.13.2\gson-2.13.2.jar'
+$libraryJars = Get-ChildItem -LiteralPath (Join-Path $serverRoot 'libraries') -Recurse -Filter '*.jar' -File |
+    ForEach-Object { $_.FullName }
+$compileEntries = @($paperApi)
+foreach ($jar in @($vaultJar, $floodgateJar, $geyserJar, $xconomyJar, $mgactivitysJar, $gmzcmailJar, $titleJar, $gsonJar)) {
     if (Test-Path -LiteralPath $jar) {
         $compileEntries += $jar
     }
 }
+$compileEntries += $libraryJars
 $compileClassPath = $compileEntries -join ';'
 
 foreach ($path in @($pluginOut, $testOut)) {

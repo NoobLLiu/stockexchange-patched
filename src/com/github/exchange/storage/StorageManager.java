@@ -36,21 +36,25 @@ public interface StorageManager {
 
     public int insertOrder(Order var1);
 
-    public void updateOrder(Order var1);
+    public boolean updateOrder(Order var1);
 
     public Order getOrder(int var1);
 
     public List<Order> getActiveOrdersByItem(int var1, Order.OrderType var2);
 
+    public long getLatestOrderCreatedAt(int var1, Order.OrderType var2);
+
     public List<Order> getOrdersByPlayer(String var1);
 
     public int insertTrade(Trade var1);
+
+    public boolean deleteTrade(int var1);
 
     public List<Trade> getTradesByPlayer(String var1, int var2, int var3);
 
     public List<Trade> getTradesByItem(int var1, int var2);
 
-    public List<Trade> getAllTrades(int limit);
+    public long getTradeVolumeSince(int var1, long var2);
 
     public Trade getLastTrade(int var1);
 
@@ -58,17 +62,17 @@ public interface StorageManager {
 
     public Trade getLastTradeOfDate(int var1, LocalDate var2);
 
-    public void insertEscrow(EscrowEntry var1);
+    public boolean insertEscrow(EscrowEntry var1);
 
     public EscrowEntry getEscrow(int var1, EscrowEntry.AssetType var2);
 
-    public void deleteEscrow(int var1, EscrowEntry.AssetType var2);
+    public boolean deleteEscrow(int var1, EscrowEntry.AssetType var2);
 
     public void upsertItemStatus(ItemStatus var1);
 
     public ItemStatus getItemStatus(int var1);
 
-    public void addToWarehouse(String var1, int var2);
+    public boolean addToWarehouse(String var1, int var2);
 
     public int getWarehouseQuantity(String var1);
 
@@ -76,13 +80,13 @@ public interface StorageManager {
 
     public Map<String, Integer> getWarehouseSnapshot();
 
-    public void addToMoneyWarehouse(String var1, BigDecimal var2);
+    public boolean addToMoneyWarehouse(String var1, BigDecimal var2);
 
     public BigDecimal getMoneyWarehouseBalance(String var1);
 
     public boolean takeFromMoneyWarehouse(String var1, BigDecimal var2);
 
-    public void addToPlayerItemWarehouse(String var1, String var2, int var3);
+    public boolean addToPlayerItemWarehouse(String var1, String var2, int var3);
 
     public Map<String, Integer> getPlayerItemWarehouse(String var1);
 

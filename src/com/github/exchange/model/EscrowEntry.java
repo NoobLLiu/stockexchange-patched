@@ -4,6 +4,7 @@
 package com.github.exchange.model;
 
 import java.math.BigDecimal;
+import java.util.UUID;
 
 public class EscrowEntry {
     private int orderId;
@@ -23,6 +24,32 @@ public class EscrowEntry {
         this.amount = amount;
         this.itemBase64 = itemBase64;
         this.quantity = quantity;
+    }
+
+    public boolean isPersistable() {
+        if (this.orderId <= 0
+            || !this.isUuid(this.playerUuid)
+            || this.assetType == null) {
+            return false;
+        }
+        if (this.assetType == AssetType.MONEY) {
+            return this.amount != null && this.amount.compareTo(BigDecimal.ZERO) > 0;
+        }
+        return this.itemBase64 != null
+            && !this.itemBase64.isBlank()
+            && this.quantity > 0;
+    }
+
+    private boolean isUuid(String value) {
+        if (value == null || value.isBlank()) {
+            return false;
+        }
+        try {
+            UUID.fromString(value);
+            return true;
+        } catch (IllegalArgumentException exception) {
+            return false;
+        }
     }
 
     public int getOrderId() {

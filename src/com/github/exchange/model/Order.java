@@ -5,6 +5,7 @@ package com.github.exchange.model;
 
 import java.math.BigDecimal;
 import java.sql.Timestamp;
+import java.util.UUID;
 
 public class Order {
     private int id;
@@ -36,11 +37,53 @@ public class Order {
     }
 
     public int getRemainingQty() {
+        if (this.quantity <= 0 || this.filledQty < 0 || this.filledQty > this.quantity) {
+            return 0;
+        }
         return this.quantity - this.filledQty;
     }
 
     public boolean isActive() {
-        return this.status == OrderStatus.OPEN || this.status == OrderStatus.PARTIAL;
+        return this.isPersistable()
+            && (this.status == OrderStatus.OPEN || this.status == OrderStatus.PARTIAL);
+    }
+
+    /**
+     * Checks only the fields required by in-memory sorting and allocation.
+     * Persistence and settlement paths must continue to use isActive().
+     */
+    public boolean isActiveForCalculation() {
+        return this.orderType != null
+            && this.price != null
+            && this.price.compareTo(BigDecimal.ZERO) > 0
+            && this.quantity > 0
+            && this.filledQty >= 0
+            && this.filledQty <= this.quantity
+            && (this.status == OrderStatus.OPEN || this.status == OrderStatus.PARTIAL);
+    }
+
+    public boolean isPersistable() {
+        if (this.id <= 0
+            || this.orderType == null
+            || this.itemId <= 0
+            || this.playerUuid == null
+            || this.playerUuid.isBlank()
+            || this.price == null
+            || this.price.compareTo(BigDecimal.ZERO) <= 0
+            || this.quantity <= 0
+            || this.filledQty < 0
+            || this.filledQty > this.quantity
+            || this.status == null
+            || this.createdAt == null
+            || this.updatedAt == null) {
+            return false;
+        }
+        try {
+            UUID.fromString(this.playerUuid);
+            return true;
+        } catch (IllegalArgumentException exception) {
+            return false;
+        }
     }
 
     public int getId() {

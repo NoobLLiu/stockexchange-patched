@@ -34,46 +34,58 @@ public class SettlementDeliveryListener implements Listener {
         StorageManager storage = this.plugin.getStorageManager();
         String playerUuid = player.getUniqueId().toString();
         BigDecimal pendingMoney = storage.getMoneyWarehouseBalance(playerUuid);
-        if (pendingMoney.compareTo(BigDecimal.ZERO) > 0 && EconomyUtil.deposit(player.getUniqueId(), pendingMoney)) {
-            storage.takeFromMoneyWarehouse(playerUuid, pendingMoney);
-            player.sendMessage("\u00a7a\u4f60\u79bb\u7ebf\u671f\u95f4\u4ea7\u751f\u7684 " + pendingMoney.toPlainString() + " " + this.plugin.getCurrencyName() + " \u5df2\u81ea\u52a8\u5230\u8d26\u3002");
+        if (pendingMoney.compareTo(BigDecimal.ZERO) > 0
+            && storage.takeFromMoneyWarehouse(playerUuid, pendingMoney)) {
+            if (EconomyUtil.deposit(player.getUniqueId(), pendingMoney)) {
+                player.sendMessage("\u00a7a\u4f60\u79bb\u7ebf\u671f\u95f4\u4ea7\u751f\u7684 " + pendingMoney.toPlainString() + " " + this.plugin.getCurrencyName() + " \u5df2\u81ea\u52a8\u5230\u8d26\u3002");
+            } else if (!storage.addToMoneyWarehouse(playerUuid, pendingMoney)) {
+                this.plugin.getLogger().severe("[AssetAudit] MONEY_JOIN_ROLLBACK_FAILED player=" + playerUuid
+                    + " amount=" + pendingMoney);
+                player.sendMessage("\u00a7c\u79bb\u7ebf\u661f\u5149\u70b9\u53d1\u653e\u5931\u8d25\uff0c\u8bf7\u7acb\u5373\u8054\u7cfb\u7ba1\u7406\u5458\u3002");
+            } else {
+                player.sendMessage("\u00a7c\u5f53\u524d\u65e0\u6cd5\u53d1\u653e\u79bb\u7ebf\u661f\u5149\u70b9\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u3002");
+            }
         }
         Map<String, Integer> pendingItems = storage.getPlayerItemWarehouse(playerUuid);
         int delivered = 0;
-        int mailed = 0;
-        int dropped = 0;
+        int retained = 0;
         for (Map.Entry<String, Integer> entry : pendingItems.entrySet()) {
             ItemStack baseItem = ItemSerializer.itemFromBase64(entry.getKey());
             int quantity = entry.getValue() == null ? 0 : entry.getValue();
             if (baseItem == null || quantity <= 0) {
                 continue;
             }
+            if (!storage.takeFromPlayerItemWarehouse(playerUuid, entry.getKey(), quantity)) {
+                continue;
+            }
             String displayName = ItemDisplayNames.resolve(baseItem);
-            int added = InventoryDelivery.addUpTo(player, baseItem, quantity);
-            int remaining = quantity - added;
-            delivered += added;
-            if (remaining > 0) {
-                ItemStack leftoverStack = baseItem.clone();
-                leftoverStack.setAmount(remaining);
-                if (this.plugin.sendItemsAsMail(player, displayName, leftoverStack)) {
-                    mailed += remaining;
-                } else {
-                    player.getWorld().dropItemNaturally(player.getLocation(), leftoverStack);
-                    dropped += remaining;
+            try {
+                int added = InventoryDelivery.addUpTo(player, baseItem, quantity);
+                int remaining = quantity - added;
+                delivered += added;
+                if (remaining > 0 && storage.addToPlayerItemWarehouse(playerUuid, entry.getKey(), remaining)) {
+                    retained += remaining;
+                } else if (remaining > 0) {
+                    this.plugin.getLogger().severe("[AssetAudit] ITEM_JOIN_RESTORE_FAILED player=" + playerUuid
+                        + " item=" + entry.getKey() + " quantity=" + remaining);
+                    player.sendMessage("\u00a7c\u7269\u54c1\u53d1\u653e\u540e\u56de\u5b58\u5931\u8d25\uff0c\u8bf7\u7acb\u5373\u8054\u7cfb\u7ba1\u7406\u5458\u3002");
                 }
             }
-            storage.takeFromPlayerItemWarehouse(playerUuid, entry.getKey(), quantity);
+            catch (Throwable throwable) {
+                if (!storage.addToPlayerItemWarehouse(playerUuid, entry.getKey(), quantity)) {
+                    this.plugin.getLogger().severe("[AssetAudit] ITEM_JOIN_ROLLBACK_FAILED player=" + playerUuid
+                        + " item=" + entry.getKey() + " quantity=" + quantity);
+                    player.sendMessage("\u00a7c\u79bb\u7ebf\u7269\u54c1\u53d1\u653e\u53d1\u751f\u5f02\u5e38\uff0c\u8bf7\u7acb\u5373\u8054\u7cfb\u7ba1\u7406\u5458\u3002");
+                }
+            }
         }
-        if (delivered > 0 || mailed > 0 || dropped > 0) {
+        if (delivered > 0 || retained > 0) {
             StringBuilder msg = new StringBuilder("\u00a7a\u4f60\u79bb\u7ebf\u671f\u95f4\u8d2d\u4e70\u6216\u6210\u4ea4\u7684\u7269\u54c1\u5df2\u81ea\u52a8\u53d1\u653e");
             if (delivered > 0) {
                 msg.append("\uff0c\u80cc\u5305\u53d6\u5f97 x").append(delivered);
             }
-            if (mailed > 0) {
-                msg.append("\uff0c\u90ae\u4ef6\u53d1\u653e x").append(mailed);
-            }
-            if (dropped > 0) {
-                msg.append("\uff0c\u5730\u9762\u6389\u843d x").append(dropped);
+            if (retained > 0) {
+                msg.append("\uff0c\u80cc\u5305\u5df2\u6ee1\uff0c\u4ed3\u5e93\u4fdd\u7559 x").append(retained);
             }
             msg.append("\u3002");
             player.sendMessage(msg.toString());

@@ -26,21 +26,23 @@ import com.github.exchange.listener.SettlementDeliveryListener;
 import com.github.exchange.manager.EscrowManager;
 import com.github.exchange.manager.ItemManager;
 import com.github.exchange.manager.OrderManager;
+import com.github.exchange.manager.SellBuyerTracker;
 import com.github.exchange.manager.TradeManager;
 import com.github.exchange.storage.FileStorageManager;
 import com.github.exchange.storage.MySQLStorageManager;
 import com.github.exchange.storage.StorageManager;
 import com.github.exchange.util.EconomyUtil;
 import com.github.exchange.util.ItemDatabase;
+import com.github.exchange.util.ItemSerializer;
 import com.github.exchange.util.TaxCalculator;
-import com.github.exchange.web.WebMarketManager;
 import java.math.BigDecimal;
+import java.io.File;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
-import java.util.concurrent.TimeUnit;
+import java.util.logging.Level;
 import net.milkbowl.vault.economy.Economy;
 import org.bukkit.Material;
 import org.bukkit.entity.Player;
@@ -67,7 +69,7 @@ extends JavaPlugin {
     private OrderManager orderManager;
     private TradeManager tradeManager;
     private EscrowManager escrowManager;
-    private WebMarketManager webMarketManager;
+    private SellBuyerTracker sellBuyerTracker;
     private ChatInputHandler chatInputHandler;
     private ItemDatabase itemDatabase;
     private boolean storageAvailable = true;
@@ -85,7 +87,6 @@ extends JavaPlugin {
     private double limitDownPercent;
     private int guiUpdateIntervalTicks;
     private int dailyRegisterLimit;
-    private int autoRemoveEmptyDays;
     private BigDecimal diamondToMoneyAmount;
     private Material diamondMaterial;
     private String currencyName;
@@ -114,14 +115,19 @@ extends JavaPlugin {
             this.storageAvailable = false;
             this.getLogger().severe("Storage initialization failed, plugin will continue in limited mode.");
             this.getLogger().severe("[stockexchange]\u6570\u636e\u5e93\u8fde\u63a5\u5931\u8d25\uff0c\u8bf7\u8054\u7cfb\u7ba1\u7406\u5458\uff01");
-            e.printStackTrace();
+            this.getLogger().log(Level.SEVERE, "Storage initialization exception", e);
         }
         this.itemManager = new ItemManager(this);
         this.itemManager.normalizeCatalogDisplayNames();
+        this.itemManager.ensureSpecialCategories();
         this.orderManager = new OrderManager(this);
         this.tradeManager = new TradeManager(this);
         this.escrowManager = new EscrowManager(this);
-        this.webMarketManager = new WebMarketManager(this);
+        this.sellBuyerTracker = new SellBuyerTracker(
+            new File(this.getDataFolder(), "sell-buyers.yml"),
+            this.getLogger()
+        );
+        this.sellBuyerTracker.load();
         this.chatInputHandler = new ChatInputHandler(this);
         this.itemDatabase = new ItemDatabase(this.getLogger());
         ExchangeCommand exchangeCmd = new ExchangeCommand(this);
@@ -156,6 +162,9 @@ extends JavaPlugin {
         }
         if (this.storageManager != null) {
             this.storageManager.shutdown();
+        }
+        if (this.sellBuyerTracker != null) {
+            this.sellBuyerTracker.save();
         }
         this.getLogger().info("StockExchange disabled!");
     }
@@ -195,14 +204,14 @@ extends JavaPlugin {
     public void loadConfigValues() {
         this.reloadConfig();
         boolean migrateLegacyFees = this.getConfig().isConfigurationSection("fees");
-        this.priceTick = this.getConfig().getDouble("trading.price_tick", 0.01);
-        this.minPrice = this.getConfig().getDouble("trading.min_price", 0.01);
-        this.maxPrice = this.getConfig().getDouble("trading.max_price", 9.999999999E7);
-        this.maxOrderQuantity = this.getConfig().getInt("trading.max_order_quantity", 2304);
-        this.orderExpireDays = this.getConfig().getInt("trading.order_expire_days", 30);
+        this.priceTick = this.positiveFiniteConfig("trading.price_tick", 0.01);
+        this.minPrice = this.positiveFiniteConfig("trading.min_price", 0.01);
+        this.maxPrice = Math.max(this.minPrice, this.positiveFiniteConfig("trading.max_price", 9.999999999E7));
+        this.maxOrderQuantity = Math.max(1, this.getConfig().getInt("trading.max_order_quantity", 2304));
+        this.orderExpireDays = Math.max(1, this.getConfig().getInt("trading.order_expire_days", 30));
         this.ignoreDurability = this.getConfig().getBoolean("trading.ignore_durability", false);
         this.ignoreTags = this.getConfig().getStringList("trading.ignore_tags");
-        BigDecimal configuredTaxRate = BigDecimal.valueOf(this.getConfig().getDouble("tax.rate_percent", 10.0));
+        BigDecimal configuredTaxRate = BigDecimal.valueOf(this.finiteConfig("tax.rate_percent", 10.0));
         this.taxRatePercent = TaxCalculator.normalizePercent(configuredTaxRate);
         if (this.taxRatePercent.compareTo(configuredTaxRate) != 0) {
             this.getLogger().warning("tax.rate_percent must be between 0 and 100; using " + this.taxRatePercent.toPlainString());
@@ -217,19 +226,36 @@ extends JavaPlugin {
             this.saveConfig();
         }
         this.priceLimitEnabled = this.getConfig().getBoolean("price_limit.enabled", true);
-        this.limitUpPercent = this.getConfig().getDouble("price_limit.limit_up_percent", 10.0);
-        this.limitDownPercent = this.getConfig().getDouble("price_limit.limit_down_percent", 10.0);
-        this.guiUpdateIntervalTicks = this.getConfig().getInt("gui.update_interval_ticks", 20);
-        this.dailyRegisterLimit = this.getConfig().getInt("market.daily_register_limit", 5);
-        this.autoRemoveEmptyDays = this.getConfig().getInt("market.auto_remove_empty_days", 2);
-        this.diamondToMoneyAmount = BigDecimal.valueOf(this.getConfig().getDouble("market.diamond_to_money_amount", 1000.0));
-        this.currencyName = this.getConfig().getString("market.currency_name", "\u66ae\u7403");
+        this.limitUpPercent = Math.max(0.0, this.finiteConfig("price_limit.limit_up_percent", 10.0));
+        this.limitDownPercent = Math.max(0.0, this.finiteConfig("price_limit.limit_down_percent", 10.0));
+        this.guiUpdateIntervalTicks = Math.max(1, this.getConfig().getInt("gui.update_interval_ticks", 20));
+        this.dailyRegisterLimit = Math.max(0, this.getConfig().getInt("market.daily_register_limit", 5));
+        this.diamondToMoneyAmount = BigDecimal.valueOf(this.positiveFiniteConfig("market.diamond_to_money_amount", 1000.0));
+        this.currencyName = this.getConfig().getString("market.currency_name", "\u661f\u5149\u70b9");
         this.diamondMaterial = Material.matchMaterial(this.getConfig().getString("market.diamond_material", "DIAMOND"));
         if (this.diamondMaterial == null) {
             this.diamondMaterial = Material.DIAMOND;
         }
         this.announcements.clear();
         this.announcements.addAll(this.getConfig().getStringList("announcements"));
+    }
+
+    private double finiteConfig(String path, double fallback) {
+        double value = this.getConfig().getDouble(path, fallback);
+        if (Double.isFinite(value)) {
+            return value;
+        }
+        this.getLogger().warning(path + " must be finite; using " + fallback);
+        return fallback;
+    }
+
+    private double positiveFiniteConfig(String path, double fallback) {
+        double value = this.finiteConfig(path, fallback);
+        if (value > 0.0) {
+            return value;
+        }
+        this.getLogger().warning(path + " must be positive; using " + fallback);
+        return fallback;
     }
 
     private void startCleanupTask() {
@@ -292,7 +318,7 @@ extends JavaPlugin {
         catch (Exception e) {
             this.storageAvailable = false;
             this.getLogger().severe("Storage reconnect failed, plugin is in limited mode.");
-            e.printStackTrace();
+            this.getLogger().log(Level.SEVERE, "Storage reconnect exception", e);
             return false;
         }
     }
@@ -329,12 +355,12 @@ extends JavaPlugin {
         return this.tradeManager;
     }
 
-    public WebMarketManager getWebMarketManager() {
-        return this.webMarketManager;
-    }
-
     public EscrowManager getEscrowManager() {
         return this.escrowManager;
+    }
+
+    public SellBuyerTracker getSellBuyerTracker() {
+        return this.sellBuyerTracker;
     }
 
     public ChatInputHandler getChatInputHandler() {
@@ -393,17 +419,22 @@ extends JavaPlugin {
         return this.systemAccount;
     }
 
-    public void collectTax(BigDecimal amount) {
+    public boolean collectTax(BigDecimal amount) {
         if (amount == null || amount.compareTo(BigDecimal.ZERO) <= 0) {
-            return;
+            return true;
         }
         if (this.systemAccount == null || this.systemAccount.isBlank()) {
-            return;
+            return true;
         }
         try {
-            EconomyUtil.deposit(java.util.UUID.fromString(this.systemAccount), amount);
+            boolean deposited = EconomyUtil.deposit(java.util.UUID.fromString(this.systemAccount), amount);
+            if (!deposited) {
+                this.getLogger().warning("Failed to deposit tax " + amount.toPlainString() + " to system account.");
+            }
+            return deposited;
         } catch (IllegalArgumentException ex) {
             this.getLogger().warning("Invalid tax.system_account UUID: " + this.systemAccount);
+            return false;
         }
     }
 
@@ -427,14 +458,6 @@ extends JavaPlugin {
         return this.dailyRegisterLimit;
     }
 
-    public int getAutoRemoveEmptyDays() {
-        return this.autoRemoveEmptyDays;
-    }
-
-    public long getAutoRemoveEmptyMillis() {
-        return TimeUnit.DAYS.toMillis(this.autoRemoveEmptyDays);
-    }
-
     public BigDecimal getDiamondToMoneyAmount() {
         return this.diamondToMoneyAmount;
     }
@@ -445,6 +468,25 @@ extends JavaPlugin {
 
     public String getCurrencyName() {
         return this.currencyName;
+    }
+
+    public boolean isGrowthAccessRestricted(Player player) {
+        return GrowthLevelAccess.restricted(player);
+    }
+
+    public boolean denyGrowthAccess(Player player) {
+        if (!this.isGrowthAccessRestricted(player)) {
+            return false;
+        }
+        player.sendMessage(this.growthAccessMessage(player));
+        return true;
+    }
+
+    public String growthAccessMessage(Player player) {
+        return "\u00a7c\u4ea4\u6613\u5e02\u573a\u529f\u80fd\u9700\u8981\u6210\u957f\u7b49\u7ea7\u8fbe\u5230 \u00a7e"
+            + GrowthLevelAccess.REQUIRED_LEVEL
+            + "\u00a7c \u7ea7\u540e\u624d\u80fd\u4f7f\u7528\u3002\u5f53\u524d\u7b49\u7ea7\uff1a\u00a7f"
+            + GrowthLevelAccess.level(player);
     }
 
     public boolean isBedrockPlayer(Player player) {
@@ -469,6 +511,9 @@ extends JavaPlugin {
         if (player == null) {
             return "\u00a7c\u53ea\u6709\u73a9\u5bb6\u53ef\u4ee5\u8fdb\u884c\u5151\u6362\u3002";
         }
+        if (this.isGrowthAccessRestricted(player)) {
+            return this.growthAccessMessage(player);
+        }
         BigDecimal tax = TaxCalculator.tax(this.diamondToMoneyAmount, this.taxRatePercent);
         BigDecimal received = TaxCalculator.afterTax(this.diamondToMoneyAmount, this.taxRatePercent);
         ItemStack removedDiamond = this.removeSingleDiamond(player);
@@ -476,8 +521,11 @@ extends JavaPlugin {
             return "\u00a7c\u4f60\u8eab\u4e0a\u6ca1\u6709\u53ef\u7528\u4e8e\u5151\u6362\u7684\u94bb\u77f3\u3002";
         }
         if (received.compareTo(BigDecimal.ZERO) > 0 && !EconomyUtil.deposit(player.getUniqueId(), received)) {
-            this.returnItem(player, removedDiamond);
-            return "\u00a7c\u5165\u8d26\u5931\u8d25\uff0c\u94bb\u77f3\u5df2\u9000\u56de\u3002";
+            if (this.returnItem(player, removedDiamond)) {
+                return "\u00a7c\u5165\u8d26\u5931\u8d25\uff0c\u94bb\u77f3\u5df2\u9000\u56de\u3002";
+            }
+            this.getLogger().severe("[AssetAudit] DIAMOND_REFUND_FAILED player=" + player.getUniqueId());
+            return "\u00a7c\u5165\u8d26\u548c\u94bb\u77f3\u9000\u56de\u5747\u5931\u8d25\uff0c\u8bf7\u7acb\u5373\u8054\u7cfb\u7ba1\u7406\u5458\u3002";
         }
         this.collectTax(tax);
         return "\u00a7a\u5151\u6362\u6210\u529f\uff1a1 \u94bb\u77f3 -> "
@@ -489,6 +537,9 @@ extends JavaPlugin {
     public String exchangeMoneyForDiamond(Player player) {
         if (player == null) {
             return "\u00a7c\u53ea\u6709\u73a9\u5bb6\u53ef\u4ee5\u8fdb\u884c\u5151\u6362\u3002";
+        }
+        if (this.isGrowthAccessRestricted(player)) {
+            return this.growthAccessMessage(player);
         }
         BigDecimal tax = TaxCalculator.tax(this.diamondToMoneyAmount, this.taxRatePercent);
         BigDecimal totalCost = TaxCalculator.withTax(this.diamondToMoneyAmount, this.taxRatePercent);
@@ -502,8 +553,21 @@ extends JavaPlugin {
         ItemStack diamond = new ItemStack(this.diamondMaterial, 1);
         HashMap<Integer, ItemStack> leftovers = player.getInventory().addItem(diamond);
         if (!leftovers.isEmpty()) {
-            EconomyUtil.deposit(player.getUniqueId(), totalCost);
-            return "\u00a7c\u80cc\u5305\u7a7a\u95f4\u4e0d\u8db3\uff0c\u65e0\u6cd5\u53d1\u653e\u94bb\u77f3\u3002";
+            if (EconomyUtil.deposit(player.getUniqueId(), totalCost)) {
+                return "\u00a7c\u80cc\u5305\u7a7a\u95f4\u4e0d\u8db3\uff0c\u661f\u5149\u70b9\u5df2\u9000\u56de\uff0c\u8bf7\u5148\u6e05\u7406\u80cc\u5305\u3002";
+            }
+            if (this.storageManager.addToMoneyWarehouse(player.getUniqueId().toString(), totalCost)) {
+                return "\u00a7e\u80cc\u5305\u7a7a\u95f4\u4e0d\u8db3\uff0c\u9000\u6b3e\u5df2\u5b58\u5165\u4ea4\u6613\u4ed3\u5e93\u3002";
+            }
+            String itemBase64 = ItemSerializer.itemToBase64(diamond);
+            if (itemBase64 != null && this.storageManager.addToPlayerItemWarehouse(
+                player.getUniqueId().toString(), itemBase64, 1)) {
+                this.collectTax(tax);
+                return "\u00a7e\u80cc\u5305\u7a7a\u95f4\u4e0d\u8db3\uff0c\u94bb\u77f3\u5df2\u5b58\u5165\u4ea4\u6613\u4ed3\u5e93\u3002";
+            }
+            this.getLogger().severe("[AssetAudit] MONEY_TO_DIAMOND_REFUND_FAILED player="
+                + player.getUniqueId() + " amount=" + totalCost);
+            return "\u00a7c\u9000\u6b3e\u548c\u94bb\u77f3\u4ed3\u5e93\u4fdd\u5b58\u5747\u5931\u8d25\uff0c\u8bf7\u7acb\u5373\u8054\u7cfb\u7ba1\u7406\u5458\u3002";
         }
         this.collectTax(tax);
         return "\u00a7a\u5151\u6362\u6210\u529f\uff1a" + totalCost.toPlainString() + " " + this.currencyName
@@ -528,10 +592,15 @@ extends JavaPlugin {
         return null;
     }
 
-    private void returnItem(Player player, ItemStack item) {
+    private boolean returnItem(Player player, ItemStack item) {
         for (ItemStack leftover : player.getInventory().addItem(item).values()) {
-            player.getWorld().dropItemNaturally(player.getLocation(), leftover);
+            String itemBase64 = ItemSerializer.itemToBase64(leftover);
+            if (itemBase64 == null || !this.storageManager.addToPlayerItemWarehouse(
+                player.getUniqueId().toString(), itemBase64, leftover.getAmount())) {
+                return false;
+            }
         }
+        return true;
     }
 
     /**

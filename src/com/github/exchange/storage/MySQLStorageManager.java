@@ -16,13 +16,16 @@ import com.github.exchange.model.Trade;
 import com.github.exchange.storage.StorageManager;
 import com.github.exchange.util.EconomyUtil;
 import com.github.exchange.util.InventoryDelivery;
+import com.github.exchange.util.ItemDisplayNames;
 import com.github.exchange.util.ItemSerializer;
 import java.math.BigDecimal;
 import java.sql.Connection;
+import java.sql.Date;
 import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.sql.Savepoint;
 import java.sql.Statement;
 import java.sql.Timestamp;
 import java.time.Instant;
@@ -35,6 +38,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Properties;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.logging.Level;
 import org.bukkit.entity.Player;
 import org.bukkit.inventory.ItemStack;
 
@@ -57,6 +61,7 @@ implements StorageManager {
     private final Map<Integer, ItemStatus> statusCache = new ConcurrentHashMap<Integer, ItemStatus>();
     private final Map<String, Integer> warehouseCache = new ConcurrentHashMap<String, Integer>();
     private final Map<String, BigDecimal> moneyWarehouseCache = new ConcurrentHashMap<String, BigDecimal>();
+    private final Map<String, Map<String, Integer>> dailyRegisterLimitCache = new ConcurrentHashMap<String, Map<String, Integer>>();
 
     public MySQLStorageManager(StockExchangePlugin plugin) {
         this.plugin = plugin;
@@ -71,7 +76,7 @@ implements StorageManager {
     public void init() {
         if (!this.loadCompatibleDriver()) {
             this.plugin.getLogger().severe("MySQL JDBC driver not found! Please check plugin jar dependency packaging.");
-            return;
+            throw new IllegalStateException("MySQL JDBC driver not found");
         }
         this.connect();
         if (this.connection == null) {
@@ -157,7 +162,7 @@ implements StorageManager {
             this.plugin.getLogger().severe("MySQL details => host=" + this.host + ", port=" + this.port + ", db=" + this.database + ", user=" + this.username);
             this.plugin.getLogger().severe("SQLState=" + e.getSQLState() + ", vendorCode=" + e.getErrorCode());
             this.plugin.getLogger().severe("Likely causes: MySQL service not running, wrong host/port, wrong user/password, user has no privileges, or server blocks this client.");
-            e.printStackTrace();
+            this.plugin.getLogger().log(Level.SEVERE, "MySQL connection exception", e);
         }
     }
 
@@ -225,6 +230,7 @@ implements StorageManager {
             this.statusCache.clear();
             this.warehouseCache.clear();
             this.moneyWarehouseCache.clear();
+            this.dailyRegisterLimitCache.clear();
             this.loadAllData();
         }
     }
@@ -241,12 +247,24 @@ implements StorageManager {
 
     private void createTables() {
         try (Statement stmt = this.connection.createStatement();){
-            stmt.executeUpdate("CREATE TABLE IF NOT EXISTS exchange_items (  id INT PRIMARY KEY AUTO_INCREMENT,  material VARCHAR(64) NOT NULL,  nbt_hash VARCHAR(64) NOT NULL,  item_base64 TEXT NOT NULL,  display_name VARCHAR(256) NOT NULL,  item_name VARCHAR(256) DEFAULT '',  item_lore TEXT,  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,  UNIQUE KEY uk_material_nbt (material, nbt_hash)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+            stmt.executeUpdate("CREATE TABLE IF NOT EXISTS exchange_items (  id INT PRIMARY KEY AUTO_INCREMENT,  material VARCHAR(64) NOT NULL,  nbt_hash VARCHAR(64) NOT NULL,  item_base64 TEXT NOT NULL,  display_name VARCHAR(256) NOT NULL,  item_name VARCHAR(256) DEFAULT '',  item_lore TEXT,  created_by_uuid VARCHAR(36),  created_by_name VARCHAR(32),  last_stocked_at BIGINT,  last_empty_at BIGINT,  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,  UNIQUE KEY uk_material_nbt (material, nbt_hash)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
             try {
                 stmt.executeUpdate("ALTER TABLE exchange_items ADD COLUMN item_name VARCHAR(256) DEFAULT ''");
             }
             catch (SQLException sQLException) {
                 // empty catch block
+            }
+            for (String migration : new String[]{
+                "ALTER TABLE exchange_items ADD COLUMN created_by_uuid VARCHAR(36)",
+                "ALTER TABLE exchange_items ADD COLUMN created_by_name VARCHAR(32)",
+                "ALTER TABLE exchange_items ADD COLUMN last_stocked_at BIGINT",
+                "ALTER TABLE exchange_items ADD COLUMN last_empty_at BIGINT"
+            }) {
+                try {
+                    stmt.executeUpdate(migration);
+                } catch (SQLException ignored) {
+                    // The column already exists on migrated installations.
+                }
             }
             try {
                 stmt.executeUpdate("ALTER TABLE exchange_items ADD COLUMN item_lore TEXT");
@@ -302,6 +320,7 @@ implements StorageManager {
             }
             stmt.executeUpdate("CREATE TABLE IF NOT EXISTS warehouse (  id INT PRIMARY KEY AUTO_INCREMENT,  item_base64 TEXT NOT NULL,  quantity INT NOT NULL) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
             stmt.executeUpdate("CREATE TABLE IF NOT EXISTS money_warehouse (  player_uuid VARCHAR(36) PRIMARY KEY,  amount DECIMAL(16,2) DEFAULT 0) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+            stmt.executeUpdate("CREATE TABLE IF NOT EXISTS daily_register_limits (  player_uuid VARCHAR(36) NOT NULL,  register_day DATE NOT NULL,  register_count INT NOT NULL DEFAULT 0,  PRIMARY KEY (player_uuid, register_day)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
             this.plugin.getLogger().info("Database tables created/verified.");
         }
         catch (SQLException e) {
@@ -317,6 +336,7 @@ implements StorageManager {
         this.loadAllStatuses();
         this.loadAllWarehouse();
         this.loadAllMoneyWarehouse();
+        this.loadDailyRegisterLimits();
     }
 
     private void loadAllItems() {
@@ -326,6 +346,10 @@ implements StorageManager {
                 ExchangeItem item = new ExchangeItem(rs.getInt("id"), rs.getString("material"), rs.getString("nbt_hash"), rs.getString("item_base64"), rs.getString("display_name"), rs.getTimestamp("created_at"));
                 item.setItemName(rs.getString("item_name"));
                 item.setItemLore(rs.getString("item_lore"));
+                item.setCreatedByUuid(rs.getString("created_by_uuid"));
+                item.setCreatedByName(rs.getString("created_by_name"));
+                item.setLastStockedAt(this.readNullableTimestamp(rs, "last_stocked_at"));
+                item.setLastEmptyAt(this.readNullableTimestamp(rs, "last_empty_at"));
                 this.itemCache.put(item.getId(), item);
             }
         }
@@ -344,7 +368,7 @@ implements StorageManager {
         if (!this.prepareForOperation(false)) {
             return -1;
         }
-        String sql = "INSERT INTO exchange_items (material, nbt_hash, item_base64, display_name, item_name, item_lore) VALUES (?, ?, ?, ?, ?, ?)";
+        String sql = "INSERT INTO exchange_items (material, nbt_hash, item_base64, display_name, item_name, item_lore, created_by_uuid, created_by_name, last_stocked_at, last_empty_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
         try (PreparedStatement ps = this.connection.prepareStatement(sql, 1);){
             ps.setString(1, item.getMaterial());
             ps.setString(2, item.getNbtHash());
@@ -352,6 +376,10 @@ implements StorageManager {
             ps.setString(4, item.getDisplayName());
             ps.setString(5, item.getItemName() != null ? item.getItemName() : item.getDisplayName());
             ps.setString(6, item.getItemLore() != null ? item.getItemLore() : "");
+            ps.setString(7, item.getCreatedByUuid());
+            ps.setString(8, item.getCreatedByName());
+            this.setNullableTimestamp(ps, 9, item.getLastStockedAt());
+            this.setNullableTimestamp(ps, 10, item.getLastEmptyAt());
             ps.executeUpdate();
             ResultSet rs = ps.getGeneratedKeys();
             if (!rs.next()) return -1;
@@ -372,7 +400,7 @@ implements StorageManager {
         if (!this.prepareForOperation(false) || item == null || item.getId() <= 0) {
             return;
         }
-        String sql = "UPDATE exchange_items SET material=?, nbt_hash=?, item_base64=?, display_name=?, item_name=?, item_lore=? WHERE id=?";
+        String sql = "UPDATE exchange_items SET material=?, nbt_hash=?, item_base64=?, display_name=?, item_name=?, item_lore=?, created_by_uuid=?, created_by_name=?, last_stocked_at=?, last_empty_at=? WHERE id=?";
         try (PreparedStatement ps = this.connection.prepareStatement(sql);){
             ps.setString(1, item.getMaterial());
             ps.setString(2, item.getNbtHash());
@@ -380,7 +408,11 @@ implements StorageManager {
             ps.setString(4, item.getDisplayName());
             ps.setString(5, item.getItemName() != null ? item.getItemName() : item.getDisplayName());
             ps.setString(6, item.getItemLore() != null ? item.getItemLore() : "");
-            ps.setInt(7, item.getId());
+            ps.setString(7, item.getCreatedByUuid());
+            ps.setString(8, item.getCreatedByName());
+            this.setNullableTimestamp(ps, 9, item.getLastStockedAt());
+            this.setNullableTimestamp(ps, 10, item.getLastEmptyAt());
+            ps.setInt(11, item.getId());
             ps.executeUpdate();
             this.itemCache.put(item.getId(), item);
         }
@@ -491,9 +523,12 @@ implements StorageManager {
     }
 
     @Override
-    public void updateOrder(Order order) {
+    public boolean updateOrder(Order order) {
+        if (order == null || order.getId() <= 0) {
+            return false;
+        }
         if (!this.prepareForOperation(false)) {
-            return;
+            return false;
         }
         String sql = "UPDATE orders SET filled_qty=?, status=?, updated_at=? WHERE id=?";
         try (PreparedStatement ps = this.connection.prepareStatement(sql);){
@@ -501,12 +536,29 @@ implements StorageManager {
             ps.setString(2, order.getStatus().name());
             ps.setLong(3, System.currentTimeMillis());
             ps.setInt(4, order.getId());
-            ps.executeUpdate();
+            if (ps.executeUpdate() <= 0) {
+                return false;
+            }
             order.setUpdatedAt(new Timestamp(System.currentTimeMillis()));
             this.orderCache.put(order.getId(), order);
+            return true;
         }
         catch (SQLException e) {
             this.plugin.getLogger().severe("Failed to update order " + order.getId() + ": " + e.getMessage());
+            return false;
+        }
+    }
+
+    private Timestamp readNullableTimestamp(ResultSet resultSet, String column) throws SQLException {
+        long value = resultSet.getLong(column);
+        return resultSet.wasNull() || value <= 0L ? null : new Timestamp(value);
+    }
+
+    private void setNullableTimestamp(PreparedStatement statement, int index, Timestamp timestamp) throws SQLException {
+        if (timestamp == null) {
+            statement.setNull(index, java.sql.Types.BIGINT);
+        } else {
+            statement.setLong(index, timestamp.getTime());
         }
     }
 
@@ -554,6 +606,23 @@ implements StorageManager {
             });
         }
         return result;
+    }
+
+    @Override
+    public long getLatestOrderCreatedAt(int itemId, Order.OrderType orderType) {
+        if (!this.prepareForOperation(false)) {
+            return 0L;
+        }
+        long latest = 0L;
+        for (Order order : this.orderCache.values()) {
+            if (order.getItemId() != itemId
+                || order.getOrderType() != orderType
+                || order.getCreatedAt() == null) {
+                continue;
+            }
+            latest = Math.max(latest, order.getCreatedAt().getTime());
+        }
+        return latest;
     }
 
     @Override
@@ -626,7 +695,31 @@ implements StorageManager {
     }
 
     @Override
+    public boolean deleteTrade(int tradeId) {
+        if (tradeId <= 0 || !this.prepareForOperation(false)) {
+            return false;
+        }
+        Trade removed = this.tradeCache.get(tradeId);
+        try (PreparedStatement ps = this.connection.prepareStatement("DELETE FROM trades WHERE id=?")) {
+            ps.setInt(1, tradeId);
+            if (ps.executeUpdate() <= 0) {
+                return removed == null;
+            }
+            this.tradeCache.remove(tradeId);
+            return true;
+        }
+        catch (SQLException e) {
+            this.plugin.getLogger().severe("Failed to delete trade " + tradeId + ": " + e.getMessage());
+            return false;
+        }
+    }
+
+    @Override
     public List<Trade> getTradesByPlayer(String playerUuid, int limit, int offset) {
+        if (playerUuid == null || limit <= 0) {
+            return new ArrayList<Trade>();
+        }
+        int safeOffset = Math.max(0, offset);
         if (!this.prepareForOperation(true)) {
             return new ArrayList<Trade>();
         }
@@ -636,8 +729,8 @@ implements StorageManager {
             result.add(trade);
         }
         result.sort((a, b) -> Long.compare(b.getTradedAt().getTime(), a.getTradedAt().getTime()));
-        int fromIndex = Math.min(offset, result.size());
-        int toIndex = Math.min(offset + limit, result.size());
+        int fromIndex = Math.min(safeOffset, result.size());
+        int toIndex = (int)Math.min((long)safeOffset + limit, result.size());
         if (fromIndex >= toIndex) {
             return new ArrayList<Trade>();
         }
@@ -645,7 +738,27 @@ implements StorageManager {
     }
 
     @Override
+    public long getTradeVolumeSince(int itemId, long sinceMillis) {
+        if (!this.prepareForOperation(false)) {
+            return 0L;
+        }
+        long volume = 0L;
+        for (Trade trade : this.tradeCache.values()) {
+            if (trade.getItemId() != itemId
+                || trade.getTradedAt() == null
+                || trade.getTradedAt().getTime() < sinceMillis) {
+                continue;
+            }
+            volume += Math.max(0, trade.getQuantity());
+        }
+        return volume;
+    }
+
+    @Override
     public List<Trade> getTradesByItem(int itemId, int limit) {
+        if (limit <= 0) {
+            return new ArrayList<Trade>();
+        }
         if (!this.prepareForOperation(true)) {
             return new ArrayList<Trade>();
         }
@@ -657,16 +770,6 @@ implements StorageManager {
         result.sort((a, b) -> Long.compare(b.getTradedAt().getTime(), a.getTradedAt().getTime()));
         if (result.size() > limit) {
             return result.subList(0, limit);
-        }
-        return result;
-    }
-
-    @Override
-    public List<Trade> getAllTrades(int limit) {
-        ArrayList<Trade> result = new ArrayList<Trade>(this.tradeCache.values());
-        result.sort((a, b) -> Long.compare(b.getTradedAt().getTime(), a.getTradedAt().getTime()));
-        if (limit > 0 && result.size() > limit) {
-            return new ArrayList<Trade>(result.subList(0, limit));
         }
         return result;
     }
@@ -738,9 +841,12 @@ implements StorageManager {
     }
 
     @Override
-    public void insertEscrow(EscrowEntry entry) {
+    public boolean insertEscrow(EscrowEntry entry) {
+        if (entry == null || entry.getOrderId() <= 0 || entry.getAssetType() == null) {
+            return false;
+        }
         if (!this.prepareForOperation(false)) {
-            return;
+            return false;
         }
         String sql = "REPLACE INTO escrow (order_id, player_uuid, asset_type, amount, item_base64, quantity) VALUES (?, ?, ?, ?, ?, ?)";
         try (PreparedStatement ps = this.connection.prepareStatement(sql);){
@@ -750,11 +856,15 @@ implements StorageManager {
             ps.setBigDecimal(4, entry.getAmount() != null ? entry.getAmount() : BigDecimal.ZERO);
             ps.setString(5, entry.getItemBase64() != null ? entry.getItemBase64() : "");
             ps.setInt(6, entry.getQuantity());
-            ps.executeUpdate();
+            if (ps.executeUpdate() <= 0) {
+                return false;
+            }
             this.escrowCache.put(this.escrowKey(entry.getOrderId(), entry.getAssetType()), entry);
+            return true;
         }
         catch (SQLException e) {
             this.plugin.getLogger().severe("Failed to insert escrow: " + e.getMessage());
+            return false;
         }
     }
 
@@ -767,9 +877,12 @@ implements StorageManager {
     }
 
     @Override
-    public void deleteEscrow(int orderId, EscrowEntry.AssetType assetType) {
+    public boolean deleteEscrow(int orderId, EscrowEntry.AssetType assetType) {
+        if (assetType == null) {
+            return false;
+        }
         if (!this.prepareForOperation(false)) {
-            return;
+            return false;
         }
         String sql = "DELETE FROM escrow WHERE order_id=? AND asset_type=?";
         try (PreparedStatement ps = this.connection.prepareStatement(sql);){
@@ -777,9 +890,11 @@ implements StorageManager {
             ps.setString(2, assetType.name());
             ps.executeUpdate();
             this.escrowCache.remove(this.escrowKey(orderId, assetType));
+            return true;
         }
         catch (SQLException e) {
             this.plugin.getLogger().severe("Failed to delete escrow: " + e.getMessage());
+            return false;
         }
     }
 
@@ -856,15 +971,24 @@ implements StorageManager {
     }
 
     @Override
-    public void addToWarehouse(String itemBase64, int quantity) {
+    public boolean addToWarehouse(String itemBase64, int quantity) {
         if (!this.prepareForOperation(true)) {
-            return;
+            return false;
         }
         if (itemBase64 == null || quantity <= 0) {
-            return;
+            return false;
         }
-        this.warehouseCache.put(itemBase64, this.warehouseCache.getOrDefault(itemBase64, 0) + quantity);
-        this.saveWarehouse();
+        int previous = this.warehouseCache.getOrDefault(itemBase64, 0);
+        this.warehouseCache.put(itemBase64, previous + quantity);
+        if (this.saveWarehouse()) {
+            return true;
+        }
+        if (previous <= 0) {
+            this.warehouseCache.remove(itemBase64);
+        } else {
+            this.warehouseCache.put(itemBase64, previous);
+        }
+        return false;
     }
 
     @Override
@@ -892,8 +1016,11 @@ implements StorageManager {
         } else {
             this.warehouseCache.put(itemBase64, current - quantity);
         }
-        this.saveWarehouse();
-        return true;
+        if (this.saveWarehouse()) {
+            return true;
+        }
+        this.warehouseCache.put(itemBase64, current);
+        return false;
     }
 
     @Override
@@ -901,12 +1028,31 @@ implements StorageManager {
         if (!this.prepareForOperation(true)) {
             return new HashMap<String, Integer>();
         }
-        return new HashMap<String, Integer>(this.warehouseCache);
+        HashMap<String, Integer> snapshot = new HashMap<String, Integer>();
+        for (Map.Entry<String, Integer> entry : this.warehouseCache.entrySet()) {
+            if (entry.getKey().startsWith(PLAYER_WAREHOUSE_PREFIX) || entry.getValue() <= 0) {
+                continue;
+            }
+            snapshot.put(entry.getKey(), entry.getValue());
+        }
+        return snapshot;
     }
 
-    private void saveWarehouse() {
+    private boolean saveWarehouse() {
+        boolean originalAutoCommit = true;
+        boolean stateRead = false;
+        Savepoint savepoint = null;
         try {
-            this.connection.createStatement().executeUpdate("DELETE FROM warehouse");
+            originalAutoCommit = this.connection.getAutoCommit();
+            stateRead = true;
+            if (originalAutoCommit) {
+                this.connection.setAutoCommit(false);
+            } else {
+                savepoint = this.connection.setSavepoint();
+            }
+            try (Statement stmt = this.connection.createStatement()) {
+                stmt.executeUpdate("DELETE FROM warehouse");
+            }
             String sql = "INSERT INTO warehouse (item_base64, quantity) VALUES (?, ?)";
             try (PreparedStatement ps = this.connection.prepareStatement(sql);){
                 for (Map.Entry<String, Integer> entry : this.warehouseCache.entrySet()) {
@@ -916,9 +1062,34 @@ implements StorageManager {
                     ps.executeUpdate();
                 }
             }
+            if (originalAutoCommit) {
+                this.connection.commit();
+            }
+            return true;
         }
         catch (SQLException e) {
+            try {
+                if (originalAutoCommit) {
+                    this.connection.rollback();
+                } else if (savepoint != null) {
+                    this.connection.rollback(savepoint);
+                }
+            } catch (SQLException rollbackException) {
+                e.addSuppressed(rollbackException);
+            }
             this.plugin.getLogger().severe("Failed to save warehouse: " + e.getMessage());
+            return false;
+        }
+        finally {
+            if (stateRead && originalAutoCommit) {
+                try {
+                    this.connection.setAutoCommit(true);
+                }
+                catch (SQLException restoreException) {
+                    this.plugin.getLogger().severe("Failed to restore MySQL auto-commit state: "
+                        + restoreException.getMessage());
+                }
+            }
         }
     }
 
@@ -937,16 +1108,44 @@ implements StorageManager {
         }
     }
 
+    private void loadDailyRegisterLimits() {
+        try (Statement stmt = this.connection.createStatement();
+             ResultSet rs = stmt.executeQuery("SELECT player_uuid, register_day, register_count FROM daily_register_limits");) {
+            while (rs.next()) {
+                String playerUuid = rs.getString("player_uuid");
+                Date date = rs.getDate("register_day");
+                if (playerUuid == null || date == null) {
+                    continue;
+                }
+                this.dailyRegisterLimitCache
+                    .computeIfAbsent(playerUuid, ignored -> new ConcurrentHashMap<String, Integer>())
+                    .put(date.toLocalDate().toString(), rs.getInt("register_count"));
+            }
+        }
+        catch (SQLException e) {
+            this.plugin.getLogger().severe("Failed to load daily register limits: " + e.getMessage());
+        }
+    }
+
     @Override
-    public void addToMoneyWarehouse(String playerUuid, BigDecimal amount) {
+    public boolean addToMoneyWarehouse(String playerUuid, BigDecimal amount) {
         if (!this.prepareForOperation(true)) {
-            return;
+            return false;
         }
         if (playerUuid == null || amount == null || amount.compareTo(BigDecimal.ZERO) <= 0) {
-            return;
+            return false;
         }
-        this.moneyWarehouseCache.put(playerUuid, this.moneyWarehouseCache.getOrDefault(playerUuid, BigDecimal.ZERO).add(amount));
-        this.saveMoneyWarehouse();
+        BigDecimal previous = this.moneyWarehouseCache.getOrDefault(playerUuid, BigDecimal.ZERO);
+        this.moneyWarehouseCache.put(playerUuid, previous.add(amount));
+        if (this.saveMoneyWarehouse()) {
+            return true;
+        }
+        if (previous.compareTo(BigDecimal.ZERO) <= 0) {
+            this.moneyWarehouseCache.remove(playerUuid);
+        } else {
+            this.moneyWarehouseCache.put(playerUuid, previous);
+        }
+        return false;
     }
 
     @Override
@@ -975,8 +1174,11 @@ implements StorageManager {
         } else {
             this.moneyWarehouseCache.put(playerUuid, newBalance);
         }
-        this.saveMoneyWarehouse();
-        return true;
+        if (this.saveMoneyWarehouse()) {
+            return true;
+        }
+        this.moneyWarehouseCache.put(playerUuid, current);
+        return false;
     }
 
     private String getPlayerWarehouseKey(String playerUuid, String itemBase64) {
@@ -984,16 +1186,25 @@ implements StorageManager {
     }
 
     @Override
-    public void addToPlayerItemWarehouse(String playerUuid, String itemBase64, int quantity) {
+    public boolean addToPlayerItemWarehouse(String playerUuid, String itemBase64, int quantity) {
         if (!this.prepareForOperation(true)) {
-            return;
+            return false;
         }
         if (playerUuid == null || itemBase64 == null || quantity <= 0) {
-            return;
+            return false;
         }
         String key = this.getPlayerWarehouseKey(playerUuid, itemBase64);
-        this.warehouseCache.put(key, this.warehouseCache.getOrDefault(key, 0) + quantity);
-        this.saveWarehouse();
+        int previous = this.warehouseCache.getOrDefault(key, 0);
+        this.warehouseCache.put(key, previous + quantity);
+        if (this.saveWarehouse()) {
+            return true;
+        }
+        if (previous <= 0) {
+            this.warehouseCache.remove(key);
+        } else {
+            this.warehouseCache.put(key, previous);
+        }
+        return false;
     }
 
     @Override
@@ -1030,22 +1241,90 @@ implements StorageManager {
         } else {
             this.warehouseCache.put(key, current - quantity);
         }
-        this.saveWarehouse();
-        return true;
+        if (this.saveWarehouse()) {
+            return true;
+        }
+        this.warehouseCache.put(key, current);
+        return false;
     }
 
     @Override
     public int getDailyRegisterCount(String playerUuid, LocalDate date) {
-        return 0;
+        if (!this.prepareForOperation(true) || playerUuid == null || date == null) {
+            return 0;
+        }
+        Map<String, Integer> counts = this.dailyRegisterLimitCache.get(playerUuid);
+        if (counts == null) {
+            return 0;
+        }
+        return counts.getOrDefault(date.toString(), 0);
     }
 
     @Override
-    public void setDailyRegisterCount(String playerUuid, LocalDate date, int count) {
+    public synchronized void setDailyRegisterCount(String playerUuid, LocalDate date, int count) {
+        if (!this.prepareForOperation(false) || playerUuid == null || date == null || count < 0) {
+            return;
+        }
+        String dateKey = date.toString();
+        Map<String, Integer> previousCounts = this.dailyRegisterLimitCache.get(playerUuid);
+        Map<String, Integer> snapshot = previousCounts == null
+            ? null : new ConcurrentHashMap<String, Integer>(previousCounts);
+        Map<String, Integer> counts = previousCounts != null
+            ? previousCounts
+            : this.dailyRegisterLimitCache.computeIfAbsent(
+                playerUuid, ignored -> new ConcurrentHashMap<String, Integer>());
+        if (count == 0) {
+            counts.remove(dateKey);
+        } else {
+            counts.put(dateKey, count);
+        }
+        try {
+            if (count == 0) {
+                try (PreparedStatement ps = this.connection.prepareStatement(
+                    "DELETE FROM daily_register_limits WHERE player_uuid=? AND register_day=?")) {
+                    ps.setString(1, playerUuid);
+                    ps.setDate(2, Date.valueOf(date));
+                    ps.executeUpdate();
+                }
+            } else {
+                try (PreparedStatement ps = this.connection.prepareStatement(
+                    "INSERT INTO daily_register_limits (player_uuid, register_day, register_count) VALUES (?, ?, ?) "
+                        + "ON DUPLICATE KEY UPDATE register_count=VALUES(register_count)")) {
+                    ps.setString(1, playerUuid);
+                    ps.setDate(2, Date.valueOf(date));
+                    ps.setInt(3, count);
+                    ps.executeUpdate();
+                }
+            }
+            if (counts.isEmpty()) {
+                this.dailyRegisterLimitCache.remove(playerUuid);
+            }
+        }
+        catch (SQLException e) {
+            if (snapshot == null || snapshot.isEmpty()) {
+                this.dailyRegisterLimitCache.remove(playerUuid);
+            } else {
+                this.dailyRegisterLimitCache.put(playerUuid, snapshot);
+            }
+            this.plugin.getLogger().severe("Failed to save daily register limit: " + e.getMessage());
+        }
     }
 
-    private void saveMoneyWarehouse() {
+    private boolean saveMoneyWarehouse() {
+        boolean originalAutoCommit = true;
+        boolean stateRead = false;
+        Savepoint savepoint = null;
         try {
-            this.connection.createStatement().executeUpdate("DELETE FROM money_warehouse");
+            originalAutoCommit = this.connection.getAutoCommit();
+            stateRead = true;
+            if (originalAutoCommit) {
+                this.connection.setAutoCommit(false);
+            } else {
+                savepoint = this.connection.setSavepoint();
+            }
+            try (Statement stmt = this.connection.createStatement()) {
+                stmt.executeUpdate("DELETE FROM money_warehouse");
+            }
             String sql = "INSERT INTO money_warehouse (player_uuid, amount) VALUES (?, ?)";
             try (PreparedStatement ps = this.connection.prepareStatement(sql);){
                 for (Map.Entry<String, BigDecimal> entry : this.moneyWarehouseCache.entrySet()) {
@@ -1055,9 +1334,34 @@ implements StorageManager {
                     ps.executeUpdate();
                 }
             }
+            if (originalAutoCommit) {
+                this.connection.commit();
+            }
+            return true;
         }
         catch (SQLException e) {
+            try {
+                if (originalAutoCommit) {
+                    this.connection.rollback();
+                } else if (savepoint != null) {
+                    this.connection.rollback(savepoint);
+                }
+            } catch (SQLException rollbackException) {
+                e.addSuppressed(rollbackException);
+            }
             this.plugin.getLogger().severe("Failed to save money warehouse: " + e.getMessage());
+            return false;
+        }
+        finally {
+            if (stateRead && originalAutoCommit) {
+                try {
+                    this.connection.setAutoCommit(true);
+                }
+                catch (SQLException restoreException) {
+                    this.plugin.getLogger().severe("Failed to restore MySQL auto-commit state: "
+                        + restoreException.getMessage());
+                }
+            }
         }
     }
 
@@ -1069,48 +1373,59 @@ implements StorageManager {
         }
         String playerUuid = player.getUniqueId().toString();
         BigDecimal moneyBalance = this.moneyWarehouseCache.getOrDefault(playerUuid, BigDecimal.ZERO);
-        if (moneyBalance.compareTo(BigDecimal.ZERO) > 0) {
-            EconomyUtil.deposit(player.getUniqueId(), moneyBalance);
-            this.moneyWarehouseCache.remove(playerUuid);
-            this.saveMoneyWarehouse();
-            player.sendMessage("\u00a7a\u5df2\u63d0\u53d6 \u00a7f" + moneyBalance + " \u00a7a\u91d1\u5e01\u3002");
+        boolean withdrewMoney = false;
+        if (moneyBalance.compareTo(BigDecimal.ZERO) > 0
+            && this.takeFromMoneyWarehouse(playerUuid, moneyBalance)) {
+            if (EconomyUtil.deposit(player.getUniqueId(), moneyBalance)) {
+                withdrewMoney = true;
+                player.sendMessage("\u00a7a\u5df2\u63d0\u53d6 \u00a7f" + moneyBalance + " \u00a7a\u661f\u5149\u70b9\u3002");
+            } else if (!this.addToMoneyWarehouse(playerUuid, moneyBalance)) {
+                this.plugin.getLogger().severe("[AssetAudit] MONEY_WITHDRAW_ROLLBACK_FAILED player=" + playerUuid
+                    + " amount=" + moneyBalance);
+                player.sendMessage("\u00a7c\u661f\u5149\u70b9\u63d0\u53d6\u5931\u8d25\uff0c\u8bf7\u7acb\u5373\u8054\u7cfb\u7ba1\u7406\u5458\u3002");
+            } else {
+                player.sendMessage("\u00a7c\u5f53\u524d\u65e0\u6cd5\u53d1\u653e\u661f\u5149\u70b9\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u3002");
+            }
+        } else if (moneyBalance.compareTo(BigDecimal.ZERO) > 0) {
+            player.sendMessage("\u00a7c\u661f\u5149\u70b9\u4ed3\u5e93\u8bfb\u53d6\u5931\u8d25\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u3002");
         }
+
         int totalItems = 0;
-        HashMap<String, Integer> toRemove = new HashMap<String, Integer>();
-        for (Map.Entry<String, Integer> entry : this.warehouseCache.entrySet()) {
-            ItemStack itemStack;
-            if (entry.getValue() <= 0 || (itemStack = ItemSerializer.itemFromBase64(entry.getKey())) == null) continue;
-            int quantity = entry.getValue();
-            int added = InventoryDelivery.addUpTo(player, itemStack, quantity);
-            if (added > 0) {
-                toRemove.put(entry.getKey(), added);
-                totalItems += added;
-            }
-            if (added < quantity) {
-                player.sendMessage("\u00a7c\u80cc\u5305\u7a7a\u95f4\u4e0d\u8db3\uff0c\u90e8\u5206\u7269\u54c1\u65e0\u6cd5\u63d0\u53d6\u3002");
-                break;
-            }
-        }
-        for (Map.Entry<String, Integer> entry : toRemove.entrySet()) {
-            int current = this.warehouseCache.getOrDefault(entry.getKey(), 0);
-            int remaining = current - entry.getValue();
-            if (remaining <= 0) {
-                this.warehouseCache.remove(entry.getKey());
+        for (Map.Entry<String, Integer> entry : this.getPlayerItemWarehouse(playerUuid).entrySet()) {
+            ItemStack itemStack = ItemSerializer.itemFromBase64(entry.getKey());
+            int quantity = entry.getValue() == null ? 0 : entry.getValue();
+            if (itemStack == null || quantity <= 0 || !this.takeFromPlayerItemWarehouse(playerUuid, entry.getKey(), quantity)) {
                 continue;
             }
-            this.warehouseCache.put(entry.getKey(), remaining);
+            try {
+                int added = InventoryDelivery.addUpTo(player, itemStack, quantity);
+                int remaining = quantity - added;
+                if (remaining > 0 && !this.addToPlayerItemWarehouse(playerUuid, entry.getKey(), remaining)) {
+                    this.plugin.getLogger().severe("[AssetAudit] ITEM_WITHDRAW_RESTORE_FAILED player=" + playerUuid
+                        + " item=" + entry.getKey() + " quantity=" + remaining);
+                }
+                totalItems += added;
+            }
+            catch (Throwable throwable) {
+                if (!this.addToPlayerItemWarehouse(playerUuid, entry.getKey(), quantity)) {
+                    this.plugin.getLogger().severe("[AssetAudit] ITEM_WITHDRAW_ROLLBACK_FAILED player=" + playerUuid
+                        + " item=" + entry.getKey() + " quantity=" + quantity);
+                }
+            }
         }
-        this.saveWarehouse();
         if (totalItems > 0) {
             player.sendMessage("\u00a7a\u5df2\u63d0\u53d6 \u00a7f" + totalItems + " \u00a7a\u4e2a\u7269\u54c1\u3002");
         }
-        if (moneyBalance.compareTo(BigDecimal.ZERO) <= 0 && totalItems <= 0) {
-            player.sendMessage("\u00a77\u4ed3\u5e93\u4e2d\u6ca1\u6709\u53ef\u63d0\u53d6\u7684\u7269\u54c1\u6216\u91d1\u5e01\u3002");
+        if (!withdrewMoney && totalItems <= 0) {
+            player.sendMessage("\u00a77\u4ed3\u5e93\u4e2d\u6ca1\u6709\u53ef\u63d0\u53d6\u7684\u7269\u54c1\u6216\u661f\u5149\u70b9\u3002");
         }
     }
 
     @Override
     public void withdrawWarehouseMoney(Player player) {
+        if (player == null) {
+            return;
+        }
         if (!this.prepareForOperation(true)) {
             player.sendMessage("\u00a7c\u6570\u636e\u5e93\u6682\u4e0d\u53ef\u7528\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u3002");
             return;
@@ -1118,26 +1433,40 @@ implements StorageManager {
         String playerUuid = player.getUniqueId().toString();
         BigDecimal moneyBalance = this.moneyWarehouseCache.getOrDefault(playerUuid, BigDecimal.ZERO);
         if (moneyBalance.compareTo(BigDecimal.ZERO) <= 0) {
-            player.sendMessage("\u00a77\u4ed3\u5e93\u4e2d\u6ca1\u6709\u53ef\u63d0\u53d6\u7684\u91d1\u5e01\u3002");
+            player.sendMessage("\u00a77\u4ed3\u5e93\u4e2d\u6ca1\u6709\u53ef\u63d0\u53d6\u7684\u661f\u5149\u70b9\u3002");
             return;
         }
-        EconomyUtil.deposit(player.getUniqueId(), moneyBalance);
-        this.moneyWarehouseCache.remove(playerUuid);
-        this.saveMoneyWarehouse();
-        player.sendMessage("\u00a7a\u5df2\u63d0\u53d6 \u00a7f" + moneyBalance + " \u00a7a\u91d1\u5e01\u3002");
+        if (!this.takeFromMoneyWarehouse(playerUuid, moneyBalance)) {
+            player.sendMessage("\u00a7c\u661f\u5149\u70b9\u4ed3\u5e93\u8bfb\u53d6\u5931\u8d25\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u3002");
+            return;
+        }
+        if (!EconomyUtil.deposit(player.getUniqueId(), moneyBalance)) {
+            if (!this.addToMoneyWarehouse(playerUuid, moneyBalance)) {
+                this.plugin.getLogger().severe("[AssetAudit] MONEY_WITHDRAW_ROLLBACK_FAILED player=" + playerUuid
+                    + " amount=" + moneyBalance);
+                player.sendMessage("\u00a7c\u661f\u5149\u70b9\u63d0\u53d6\u5931\u8d25\uff0c\u8bf7\u7acb\u5373\u8054\u7cfb\u7ba1\u7406\u5458\u3002");
+            } else {
+                player.sendMessage("\u00a7c\u5f53\u524d\u65e0\u6cd5\u53d1\u653e\u661f\u5149\u70b9\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u3002");
+            }
+            return;
+        }
+        player.sendMessage("\u00a7a\u5df2\u63d0\u53d6 \u00a7f" + moneyBalance + " \u00a7a\u661f\u5149\u70b9\u3002");
     }
 
     @Override
     public void withdrawWarehouseItem(Player player, String itemBase64) {
-        if (!this.prepareForOperation(true)) {
-            player.sendMessage("\u00a7c\u6570\u636e\u5e93\u6682\u4e0d\u53ef\u7528\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u3002");
+        if (player == null || !this.prepareForOperation(true)) {
+            if (player != null) {
+                player.sendMessage("\u00a7c\u6570\u636e\u5e93\u6682\u4e0d\u53ef\u7528\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u3002");
+            }
             return;
         }
         if (itemBase64 == null || itemBase64.isEmpty()) {
             player.sendMessage("\u00a7c\u65e0\u6548\u7684\u4ed3\u5e93\u7269\u54c1\u3002");
             return;
         }
-        int quantity = this.warehouseCache.getOrDefault(itemBase64, 0);
+        String playerUuid = player.getUniqueId().toString();
+        int quantity = this.getPlayerItemWarehouse(playerUuid).getOrDefault(itemBase64, 0);
         if (quantity <= 0) {
             player.sendMessage("\u00a77\u8be5\u7269\u54c1\u5df2\u88ab\u63d0\u53d6\u6216\u4e0d\u5b58\u5728\u3002");
             return;
@@ -1147,20 +1476,30 @@ implements StorageManager {
             player.sendMessage("\u00a7c\u7269\u54c1\u6570\u636e\u635f\u574f\uff0c\u65e0\u6cd5\u63d0\u53d6\u3002");
             return;
         }
-        int added = InventoryDelivery.addUpTo(player, itemStack, quantity);
-        if (added <= 0) {
-            player.sendMessage("\u00a7c\u80cc\u5305\u7a7a\u95f4\u4e0d\u8db3\uff0c\u65e0\u6cd5\u63d0\u53d6\u8be5\u7269\u54c1\u3002");
+        if (!this.takeFromPlayerItemWarehouse(playerUuid, itemBase64, quantity)) {
+            player.sendMessage("\u00a7c\u4ed3\u5e93\u6570\u636e\u53d8\u66f4\u5931\u8d25\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u3002");
             return;
         }
-        int remaining = quantity - added;
-        if (remaining <= 0) {
-            this.warehouseCache.remove(itemBase64);
-        } else {
-            this.warehouseCache.put(itemBase64, remaining);
-            player.sendMessage("\u00a7c\u80cc\u5305\u7a7a\u95f4\u4e0d\u8db3\uff0c\u90e8\u5206\u7269\u54c1\u672a\u63d0\u53d6\u3002");
+        try {
+            int added = InventoryDelivery.addUpTo(player, itemStack, quantity);
+            int remaining = quantity - added;
+            if (remaining > 0 && !this.addToPlayerItemWarehouse(playerUuid, itemBase64, remaining)) {
+                this.plugin.getLogger().severe("[AssetAudit] ITEM_WITHDRAW_RESTORE_FAILED player=" + playerUuid
+                    + " item=" + itemBase64 + " quantity=" + remaining);
+                player.sendMessage("\u00a7c\u672a\u80fd\u56de\u5b58\u5269\u4f59\u7269\u54c1\uff0c\u8bf7\u7acb\u5373\u8054\u7cfb\u7ba1\u7406\u5458\u3002");
+            }
+            player.sendMessage("\u00a7a\u5df2\u63d0\u53d6 \u00a7f" + added + " \u00a7a\u4e2a\u7269\u54c1"
+                + (remaining > 0 ? "\uff0c\u5269\u4f59 " + remaining + " \u4e2a\u4fdd\u7559\u5728\u4ed3\u5e93\u3002" : "\u3002"));
         }
-        this.saveWarehouse();
-        player.sendMessage("\u00a7a\u5df2\u63d0\u53d6 \u00a7f" + added + " \u00a7a\u4e2a\u7269\u54c1\u3002");
+        catch (Throwable throwable) {
+            if (!this.addToPlayerItemWarehouse(playerUuid, itemBase64, quantity)) {
+                this.plugin.getLogger().severe("[AssetAudit] ITEM_WITHDRAW_ROLLBACK_FAILED player=" + playerUuid
+                    + " item=" + itemBase64 + " quantity=" + quantity);
+                player.sendMessage("\u00a7c\u7269\u54c1\u63d0\u53d6\u53d1\u751f\u5f02\u5e38\uff0c\u4e14\u65e0\u6cd5\u81ea\u52a8\u56de\u5b58\uff0c\u8bf7\u7acb\u5373\u8054\u7cfb\u7ba1\u7406\u5458\u3002");
+            } else {
+                player.sendMessage("\u00a7c\u7269\u54c1\u63d0\u53d6\u5931\u8d25\uff0c\u5df2\u8fd4\u56de\u4ed3\u5e93\u3002");
+            }
+        }
     }
 
     @Override

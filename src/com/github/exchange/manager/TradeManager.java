@@ -16,12 +16,14 @@ public class TradeManager {
 
     public List<Trade> getPlayerTrades(String playerUuid, int page) {
         int limit = 20;
-        int offset = (page - 1) * limit;
+        int safePage = Math.max(1, page);
+        long rawOffset = (long)(safePage - 1) * limit;
+        int offset = rawOffset > Integer.MAX_VALUE ? Integer.MAX_VALUE : (int)rawOffset;
         return this.plugin.getStorageManager().getTradesByPlayer(playerUuid, limit, offset);
     }
 
     public List<Trade> getItemTrades(int itemId, int limit) {
-        return this.plugin.getStorageManager().getTradesByItem(itemId, limit);
+        return this.plugin.getStorageManager().getTradesByItem(itemId, Math.max(0, limit));
     }
 
     public Trade getLastTrade(int itemId) {

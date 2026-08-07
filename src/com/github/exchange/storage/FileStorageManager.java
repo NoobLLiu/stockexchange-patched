@@ -18,10 +18,15 @@ import com.github.exchange.model.Trade;
 import com.github.exchange.storage.StorageManager;
 import com.github.exchange.util.EconomyUtil;
 import com.github.exchange.util.InventoryDelivery;
+import com.github.exchange.util.ItemDisplayNames;
 import com.github.exchange.util.ItemSerializer;
 import java.io.File;
 import java.io.IOException;
 import java.math.BigDecimal;
+import java.nio.file.AtomicMoveNotSupportedException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.sql.Timestamp;
 import java.time.Instant;
 import java.time.LocalDate;
@@ -120,12 +125,7 @@ implements StorageManager {
         config.set("next_item_id", (Object)this.nextItemId.get());
         config.set("next_order_id", (Object)this.nextOrderId.get());
         config.set("next_trade_id", (Object)this.nextTradeId.get());
-        try {
-            config.save(file);
-        }
-        catch (IOException e) {
-            this.plugin.getLogger().severe("Failed to save ID counters: " + e.getMessage());
-        }
+        this.saveYamlAtomically(file, config, "ID counters");
     }
 
     private void loadAllItems() {
@@ -184,12 +184,7 @@ implements StorageManager {
         config.set("created_at", (Object)(item.getCreatedAt() != null ? item.getCreatedAt().getTime() : System.currentTimeMillis()));
         config.set("last_stocked_at", (Object)(item.getLastStockedAt() != null ? item.getLastStockedAt().getTime() : 0L));
         config.set("last_empty_at", (Object)(item.getLastEmptyAt() != null ? item.getLastEmptyAt().getTime() : 0L));
-        try {
-            config.save(file);
-        }
-        catch (IOException e) {
-            this.plugin.getLogger().severe("Failed to save item " + item.getId() + ": " + e.getMessage());
-        }
+        this.saveYamlAtomically(file, config, "item " + item.getId());
     }
 
     @Override
@@ -299,11 +294,14 @@ implements StorageManager {
             for (String key : config.getKeys(false)) {
                 ConfigurationSection sec = config.getConfigurationSection(key);
                 if (sec == null) continue;
-                Order order = new Order(sec.getInt("id"), Order.OrderType.valueOf(sec.getString("order_type")), sec.getInt("item_id"), sec.getString("player_uuid"), new BigDecimal(sec.getString("price")), sec.getInt("quantity"), sec.getInt("filled_qty"), Order.OrderStatus.valueOf(sec.getString("status")), new Timestamp(sec.getLong("created_at")), new Timestamp(sec.getLong("updated_at")));
-                order.setPlayerName(sec.getString("player_name", ""));
-                this.orderCache.put(order.getId(), order);
-                if (order.getId() <= maxId) continue;
-                maxId = order.getId();
+                try {
+                    Order order = new Order(sec.getInt("id"), Order.OrderType.valueOf(sec.getString("order_type")), sec.getInt("item_id"), sec.getString("player_uuid"), new BigDecimal(sec.getString("price")), sec.getInt("quantity"), sec.getInt("filled_qty"), Order.OrderStatus.valueOf(sec.getString("status")), new Timestamp(sec.getLong("created_at")), new Timestamp(sec.getLong("updated_at")));
+                    order.setPlayerName(sec.getString("player_name", ""));
+                    this.orderCache.put(order.getId(), order);
+                    maxId = Math.max(maxId, order.getId());
+                } catch (RuntimeException ex) {
+                    this.warnBadRecord("order", file.getName(), key, ex);
+                }
             }
         }
         if (maxId >= this.nextOrderId.get()) {
@@ -322,19 +320,35 @@ implements StorageManager {
             order.setUpdatedAt(new Timestamp(System.currentTimeMillis()));
         }
         this.orderCache.put(id, order);
-        this.saveOrdersForItem(order.getItemId());
+        if (!this.saveOrdersForItem(order.getItemId())) {
+            this.orderCache.remove(id);
+            this.nextOrderId.compareAndSet(id + 1, id);
+            return -1;
+        }
         this.saveIdCounters();
         return id;
     }
 
     @Override
-    public void updateOrder(Order order) {
+    public boolean updateOrder(Order order) {
+        if (order == null || order.getId() <= 0) {
+            return false;
+        }
+        Order previous = this.orderCache.get(order.getId());
         order.setUpdatedAt(new Timestamp(System.currentTimeMillis()));
         this.orderCache.put(order.getId(), order);
-        this.saveOrdersForItem(order.getItemId());
+        if (this.saveOrdersForItem(order.getItemId())) {
+            return true;
+        }
+        if (previous == null) {
+            this.orderCache.remove(order.getId());
+        } else {
+            this.orderCache.put(order.getId(), previous);
+        }
+        return false;
     }
 
-    private void saveOrdersForItem(int itemId) {
+    private boolean saveOrdersForItem(int itemId) {
         File file = new File(this.ordersFolder, "item_" + itemId + ".yml");
         YamlConfiguration config = new YamlConfiguration();
         int count = 0;
@@ -354,16 +368,10 @@ implements StorageManager {
             config.set(key + ".updated_at", (Object)order.getUpdatedAt().getTime());
             ++count;
         }
-        try {
-            if (count > 0) {
-                config.save(file);
-            } else if (file.exists()) {
-                file.delete();
-            }
+        if (count > 0) {
+            return this.saveYamlAtomically(file, config, "orders for item " + itemId);
         }
-        catch (IOException e) {
-            this.plugin.getLogger().severe("Failed to save orders for item " + itemId + ": " + e.getMessage());
-        }
+        return !file.exists() || file.delete();
     }
 
     @Override
@@ -407,6 +415,20 @@ implements StorageManager {
     }
 
     @Override
+    public long getLatestOrderCreatedAt(int itemId, Order.OrderType orderType) {
+        long latest = 0L;
+        for (Order order : this.orderCache.values()) {
+            if (order.getItemId() != itemId
+                || order.getOrderType() != orderType
+                || order.getCreatedAt() == null) {
+                continue;
+            }
+            latest = Math.max(latest, order.getCreatedAt().getTime());
+        }
+        return latest;
+    }
+
+    @Override
     public List<Order> getOrdersByPlayer(String playerUuid) {
         ArrayList<Order> result = new ArrayList<Order>();
         for (Order order : this.orderCache.values()) {
@@ -428,10 +450,13 @@ implements StorageManager {
             for (String key : config.getKeys(false)) {
                 ConfigurationSection sec = config.getConfigurationSection(key);
                 if (sec == null) continue;
-                Trade trade = new Trade(sec.getInt("id"), sec.getInt("item_id"), sec.getString("buyer_uuid"), sec.getString("seller_uuid"), new BigDecimal(sec.getString("price")), sec.getInt("quantity"), new BigDecimal(sec.getString("total_amount")), new BigDecimal(sec.getString("buyer_fee")), new BigDecimal(sec.getString("seller_fee")), sec.getInt("buy_order_id"), sec.getInt("sell_order_id"), new Timestamp(sec.getLong("traded_at")));
-                this.tradeCache.put(trade.getId(), trade);
-                if (trade.getId() <= maxId) continue;
-                maxId = trade.getId();
+                try {
+                    Trade trade = new Trade(sec.getInt("id"), sec.getInt("item_id"), sec.getString("buyer_uuid"), sec.getString("seller_uuid"), new BigDecimal(sec.getString("price")), sec.getInt("quantity"), new BigDecimal(sec.getString("total_amount")), new BigDecimal(sec.getString("buyer_fee")), new BigDecimal(sec.getString("seller_fee")), sec.getInt("buy_order_id"), sec.getInt("sell_order_id"), new Timestamp(sec.getLong("traded_at")));
+                    this.tradeCache.put(trade.getId(), trade);
+                    maxId = Math.max(maxId, trade.getId());
+                } catch (RuntimeException ex) {
+                    this.warnBadRecord("trade", file.getName(), key, ex);
+                }
             }
         }
         if (maxId >= this.nextTradeId.get()) {
@@ -447,12 +472,29 @@ implements StorageManager {
             trade.setTradedAt(new Timestamp(System.currentTimeMillis()));
         }
         this.tradeCache.put(id, trade);
-        this.saveTradesForItem(trade.getItemId());
+        if (!this.saveTradesForItem(trade.getItemId())) {
+            this.tradeCache.remove(id);
+            this.nextTradeId.compareAndSet(id + 1, id);
+            return -1;
+        }
         this.saveIdCounters();
         return id;
     }
 
-    private void saveTradesForItem(int itemId) {
+    @Override
+    public boolean deleteTrade(int tradeId) {
+        Trade removed = this.tradeCache.remove(tradeId);
+        if (removed == null) {
+            return true;
+        }
+        if (this.saveTradesForItem(removed.getItemId())) {
+            return true;
+        }
+        this.tradeCache.put(tradeId, removed);
+        return false;
+    }
+
+    private boolean saveTradesForItem(int itemId) {
         File file = new File(this.tradesFolder, "item_" + itemId + ".yml");
         YamlConfiguration config = new YamlConfiguration();
         int count = 0;
@@ -473,28 +515,26 @@ implements StorageManager {
             config.set(key + ".traded_at", (Object)trade.getTradedAt().getTime());
             ++count;
         }
-        try {
-            if (count > 0) {
-                config.save(file);
-            } else if (file.exists()) {
-                file.delete();
-            }
+        if (count > 0) {
+            return this.saveYamlAtomically(file, config, "trades for item " + itemId);
         }
-        catch (IOException e) {
-            this.plugin.getLogger().severe("Failed to save trades for item " + itemId + ": " + e.getMessage());
-        }
+        return !file.exists() || file.delete();
     }
 
     @Override
     public List<Trade> getTradesByPlayer(String playerUuid, int limit, int offset) {
+        if (playerUuid == null || limit <= 0) {
+            return new ArrayList<Trade>();
+        }
+        int safeOffset = Math.max(0, offset);
         ArrayList<Trade> result = new ArrayList<Trade>();
         for (Trade trade : this.tradeCache.values()) {
             if (!trade.getBuyerUuid().equals(playerUuid) && !trade.getSellerUuid().equals(playerUuid)) continue;
             result.add(trade);
         }
         result.sort((a, b) -> Long.compare(b.getTradedAt().getTime(), a.getTradedAt().getTime()));
-        int fromIndex = Math.min(offset, result.size());
-        int toIndex = Math.min(offset + limit, result.size());
+        int fromIndex = Math.min(safeOffset, result.size());
+        int toIndex = (int)Math.min((long)safeOffset + limit, result.size());
         if (fromIndex >= toIndex) {
             return new ArrayList<Trade>();
         }
@@ -503,6 +543,9 @@ implements StorageManager {
 
     @Override
     public List<Trade> getTradesByItem(int itemId, int limit) {
+        if (limit <= 0) {
+            return new ArrayList<Trade>();
+        }
         ArrayList<Trade> result = new ArrayList<Trade>();
         for (Trade trade : this.tradeCache.values()) {
             if (trade.getItemId() != itemId) continue;
@@ -516,13 +559,17 @@ implements StorageManager {
     }
 
     @Override
-    public List<Trade> getAllTrades(int limit) {
-        ArrayList<Trade> result = new ArrayList<Trade>(this.tradeCache.values());
-        result.sort((a, b) -> Long.compare(b.getTradedAt().getTime(), a.getTradedAt().getTime()));
-        if (limit > 0 && result.size() > limit) {
-            return new ArrayList<Trade>(result.subList(0, limit));
+    public long getTradeVolumeSince(int itemId, long sinceMillis) {
+        long volume = 0L;
+        for (Trade trade : this.tradeCache.values()) {
+            if (trade.getItemId() != itemId
+                || trade.getTradedAt() == null
+                || trade.getTradedAt().getTime() < sinceMillis) {
+                continue;
+            }
+            volume += Math.max(0, trade.getQuantity());
         }
-        return result;
+        return volume;
     }
 
     @Override
@@ -574,8 +621,12 @@ implements StorageManager {
         for (String key : config.getKeys(false)) {
             ConfigurationSection sec = config.getConfigurationSection(key);
             if (sec == null) continue;
-            EscrowEntry entry = new EscrowEntry(sec.getInt("order_id"), sec.getString("player_uuid"), EscrowEntry.AssetType.valueOf(sec.getString("asset_type")), sec.contains("amount") ? new BigDecimal(sec.getString("amount")) : BigDecimal.ZERO, sec.getString("item_base64"), sec.getInt("quantity"));
-            this.escrowCache.put(this.escrowKey(entry.getOrderId(), entry.getAssetType()), entry);
+            try {
+                EscrowEntry entry = new EscrowEntry(sec.getInt("order_id"), sec.getString("player_uuid"), EscrowEntry.AssetType.valueOf(sec.getString("asset_type")), sec.contains("amount") ? new BigDecimal(sec.getString("amount")) : BigDecimal.ZERO, sec.getString("item_base64"), sec.getInt("quantity"));
+                this.escrowCache.put(this.escrowKey(entry.getOrderId(), entry.getAssetType()), entry);
+            } catch (RuntimeException ex) {
+                this.warnBadRecord("escrow", file.getName(), key, ex);
+            }
         }
     }
 
@@ -584,9 +635,21 @@ implements StorageManager {
     }
 
     @Override
-    public void insertEscrow(EscrowEntry entry) {
-        this.escrowCache.put(this.escrowKey(entry.getOrderId(), entry.getAssetType()), entry);
-        this.saveAllEscrow();
+    public boolean insertEscrow(EscrowEntry entry) {
+        if (entry == null || entry.getOrderId() <= 0 || entry.getAssetType() == null) {
+            return false;
+        }
+        String key = this.escrowKey(entry.getOrderId(), entry.getAssetType());
+        EscrowEntry previous = this.escrowCache.put(key, entry);
+        if (this.saveAllEscrow()) {
+            return true;
+        }
+        if (previous == null) {
+            this.escrowCache.remove(key);
+        } else {
+            this.escrowCache.put(key, previous);
+        }
+        return false;
     }
 
     @Override
@@ -595,12 +658,22 @@ implements StorageManager {
     }
 
     @Override
-    public void deleteEscrow(int orderId, EscrowEntry.AssetType assetType) {
-        this.escrowCache.remove(this.escrowKey(orderId, assetType));
-        this.saveAllEscrow();
+    public boolean deleteEscrow(int orderId, EscrowEntry.AssetType assetType) {
+        if (assetType == null) {
+            return false;
+        }
+        String key = this.escrowKey(orderId, assetType);
+        EscrowEntry removed = this.escrowCache.remove(key);
+        if (this.saveAllEscrow()) {
+            return true;
+        }
+        if (removed != null) {
+            this.escrowCache.put(key, removed);
+        }
+        return false;
     }
 
-    private void saveAllEscrow() {
+    private boolean saveAllEscrow() {
         File file = new File(this.dataFolder, "escrow.yml");
         YamlConfiguration config = new YamlConfiguration();
         for (EscrowEntry entry : this.escrowCache.values()) {
@@ -612,12 +685,7 @@ implements StorageManager {
             config.set(key + ".item_base64", (Object)entry.getItemBase64());
             config.set(key + ".quantity", (Object)entry.getQuantity());
         }
-        try {
-            config.save(file);
-        }
-        catch (IOException e) {
-            this.plugin.getLogger().severe("Failed to save escrow: " + e.getMessage());
-        }
+        return this.saveYamlAtomically(file, config, "escrow");
     }
 
     private void loadAllStatuses() {
@@ -629,15 +697,19 @@ implements StorageManager {
         for (String key : config.getKeys(false)) {
             ConfigurationSection sec = config.getConfigurationSection(key);
             if (sec == null) continue;
-            ItemStatus status = new ItemStatus(sec.getInt("item_id"), sec.getBoolean("is_suspended"), new BigDecimal(sec.getString("last_close")), new BigDecimal(sec.getString("last_open")), new BigDecimal(sec.getString("high_today")), new BigDecimal(sec.getString("low_today")), sec.getInt("volume_today"));
-            status.setLowestSellCurrent(new BigDecimal(sec.getString("lowest_sell_current", "0")));
-            status.setLowestSellReference(new BigDecimal(sec.getString("lowest_sell_reference", "0")));
-            status.setLowestSellReferenceAt(sec.getLong("lowest_sell_reference_at", 0L));
-            status.setLowestSellReference7d(new BigDecimal(sec.getString("lowest_sell_reference_7d", sec.getString("lowest_sell_reference", "0"))));
-            status.setLowestSellReferenceAt7d(sec.getLong("lowest_sell_reference_at_7d", sec.getLong("lowest_sell_reference_at", 0L)));
-            status.setLowestSellReference30d(new BigDecimal(sec.getString("lowest_sell_reference_30d", sec.getString("lowest_sell_reference", "0"))));
-            status.setLowestSellReferenceAt30d(sec.getLong("lowest_sell_reference_at_30d", sec.getLong("lowest_sell_reference_at", 0L)));
-            this.statusCache.put(status.getItemId(), status);
+            try {
+                ItemStatus status = new ItemStatus(sec.getInt("item_id"), sec.getBoolean("is_suspended"), new BigDecimal(sec.getString("last_close")), new BigDecimal(sec.getString("last_open")), new BigDecimal(sec.getString("high_today")), new BigDecimal(sec.getString("low_today")), sec.getInt("volume_today"));
+                status.setLowestSellCurrent(new BigDecimal(sec.getString("lowest_sell_current", "0")));
+                status.setLowestSellReference(new BigDecimal(sec.getString("lowest_sell_reference", "0")));
+                status.setLowestSellReferenceAt(sec.getLong("lowest_sell_reference_at", 0L));
+                status.setLowestSellReference7d(new BigDecimal(sec.getString("lowest_sell_reference_7d", sec.getString("lowest_sell_reference", "0"))));
+                status.setLowestSellReferenceAt7d(sec.getLong("lowest_sell_reference_at_7d", sec.getLong("lowest_sell_reference_at", 0L)));
+                status.setLowestSellReference30d(new BigDecimal(sec.getString("lowest_sell_reference_30d", sec.getString("lowest_sell_reference", "0"))));
+                status.setLowestSellReferenceAt30d(sec.getLong("lowest_sell_reference_at_30d", sec.getLong("lowest_sell_reference_at", 0L)));
+                this.statusCache.put(status.getItemId(), status);
+            } catch (RuntimeException ex) {
+                this.warnBadRecord("status", file.getName(), key, ex);
+            }
         }
     }
 
@@ -677,12 +749,7 @@ implements StorageManager {
             config.set(key + ".lowest_sell_reference_30d", (Object)(status.getLowestSellReference30d() != null ? status.getLowestSellReference30d().toString() : "0"));
             config.set(key + ".lowest_sell_reference_at_30d", (Object)status.getLowestSellReferenceAt30d());
         }
-        try {
-            config.save(file);
-        }
-        catch (IOException e) {
-            this.plugin.getLogger().severe("Failed to save statuses: " + e.getMessage());
-        }
+        this.saveYamlAtomically(file, config, "statuses");
     }
 
     private void loadAllWarehouse() {
@@ -700,13 +767,21 @@ implements StorageManager {
     }
 
     @Override
-    public void addToWarehouse(String itemBase64, int quantity) {
+    public boolean addToWarehouse(String itemBase64, int quantity) {
         if (itemBase64 == null || quantity <= 0) {
-            return;
+            return false;
         }
-        this.warehouseCache.put(itemBase64, this.warehouseCache.getOrDefault(itemBase64, 0) + quantity);
-        this.markItemStocked(itemBase64);
-        this.saveWarehouse();
+        int previous = this.warehouseCache.getOrDefault(itemBase64, 0);
+        this.warehouseCache.put(itemBase64, previous + quantity);
+        if (this.saveWarehouse()) {
+            return true;
+        }
+        if (previous <= 0) {
+            this.warehouseCache.remove(itemBase64);
+        } else {
+            this.warehouseCache.put(itemBase64, previous);
+        }
+        return false;
     }
 
     @Override
@@ -728,48 +803,70 @@ implements StorageManager {
         } else {
             this.warehouseCache.put(itemBase64, current - quantity);
         }
-        this.markItemEmptyState(itemBase64);
-        this.saveWarehouse();
-        return true;
+        if (this.saveWarehouse()) {
+            this.markItemEmptyState(itemBase64);
+            return true;
+        }
+        this.warehouseCache.put(itemBase64, current);
+        return false;
     }
 
     @Override
     public Map<String, Integer> getWarehouseSnapshot() {
-        return new HashMap<String, Integer>(this.warehouseCache);
+        HashMap<String, Integer> snapshot = new HashMap<String, Integer>();
+        for (Map.Entry<String, Integer> entry : this.warehouseCache.entrySet()) {
+            if (entry.getKey().startsWith(PLAYER_WAREHOUSE_PREFIX) || entry.getValue() <= 0) {
+                continue;
+            }
+            snapshot.put(entry.getKey(), entry.getValue());
+        }
+        return snapshot;
     }
 
-    private void saveWarehouse() {
-        File[] oldFiles = this.warehouseFolder.listFiles((dir, name) -> name.endsWith(".yml"));
-        if (oldFiles != null) {
-            for (File f : oldFiles) {
-                f.delete();
-            }
+    private boolean saveWarehouse() {
+        File temporary = new File(this.dataFolder, "warehouse.tmp-" + System.nanoTime());
+        File backup = new File(this.dataFolder, "warehouse.bak-" + System.nanoTime());
+        if (!temporary.mkdirs()) {
+            this.plugin.getLogger().severe("Failed to create temporary warehouse directory.");
+            return false;
         }
         int index = 0;
-        for (Map.Entry<String, Integer> entry : this.warehouseCache.entrySet()) {
-            if (entry.getValue() <= 0) continue;
-            File file = new File(this.warehouseFolder, index + ".yml");
-            YamlConfiguration config = new YamlConfiguration();
-            config.set("item_base64", (Object)entry.getKey());
-            config.set("quantity", (Object)entry.getValue());
-            try {
+        try {
+            for (Map.Entry<String, Integer> entry : this.warehouseCache.entrySet()) {
+                if (entry.getValue() <= 0) continue;
+                File file = new File(temporary, index + ".yml");
+                YamlConfiguration config = new YamlConfiguration();
+                config.set("item_base64", (Object)entry.getKey());
+                config.set("quantity", (Object)entry.getValue());
                 config.save(file);
+                ++index;
             }
-            catch (IOException e) {
-                this.plugin.getLogger().severe("Failed to save warehouse entry: " + e.getMessage());
+            if (this.warehouseFolder.exists()) {
+                this.movePath(this.warehouseFolder, backup);
             }
-            ++index;
+            try {
+                this.movePath(temporary, this.warehouseFolder);
+            }
+            catch (IOException replacementFailure) {
+                if (backup.exists()) {
+                    this.movePath(backup, this.warehouseFolder);
+                }
+                throw replacementFailure;
+            }
+            if (backup.exists() && !this.deleteTree(backup)) {
+                this.plugin.getLogger().warning("Failed to remove old warehouse backup: " + backup.getName());
+            }
+            return true;
         }
-    }
-
-    private void markItemStocked(String itemBase64) {
-        ExchangeItem item = this.findItemByBase64(itemBase64);
-        if (item == null) {
-            return;
+        catch (IOException e) {
+            this.plugin.getLogger().severe("Failed to save warehouse: " + e.getMessage());
+            return false;
         }
-        item.setLastStockedAt(new Timestamp(System.currentTimeMillis()));
-        item.setLastEmptyAt(null);
-        this.saveExchangeItem(item);
+        finally {
+            if (temporary.exists()) {
+                this.deleteTree(temporary);
+            }
+        }
     }
 
     private void markItemEmptyState(String itemBase64) {
@@ -876,19 +973,14 @@ implements StorageManager {
         }
     }
 
-    private void saveDailyRegisterLimits() {
+    private boolean saveDailyRegisterLimits() {
         YamlConfiguration config = new YamlConfiguration();
         for (Map.Entry<String, Map<String, Integer>> playerEntry : this.dailyRegisterLimitCache.entrySet()) {
             for (Map.Entry<String, Integer> dayEntry : playerEntry.getValue().entrySet()) {
                 config.set(playerEntry.getKey() + "." + dayEntry.getKey(), dayEntry.getValue());
             }
         }
-        try {
-            config.save(this.dailyRegisterLimitFile);
-        }
-        catch (IOException e) {
-            this.plugin.getLogger().severe("Failed to save daily register limits: " + e.getMessage());
-        }
+        return this.saveYamlAtomically(this.dailyRegisterLimitFile, config, "daily register limits");
     }
 
     @Override
@@ -904,11 +996,17 @@ implements StorageManager {
     }
 
     @Override
-    public void setDailyRegisterCount(String playerUuid, LocalDate date, int count) {
-        if (playerUuid == null || date == null) {
+    public synchronized void setDailyRegisterCount(String playerUuid, LocalDate date, int count) {
+        if (playerUuid == null || date == null || count < 0) {
             return;
         }
-        Map<String, Integer> counts = this.dailyRegisterLimitCache.computeIfAbsent(playerUuid, ignored -> new ConcurrentHashMap<String, Integer>());
+        Map<String, Integer> previousCounts = this.dailyRegisterLimitCache.get(playerUuid);
+        Map<String, Integer> snapshot = previousCounts == null
+            ? null : new ConcurrentHashMap<String, Integer>(previousCounts);
+        Map<String, Integer> counts = previousCounts != null
+            ? previousCounts
+            : this.dailyRegisterLimitCache.computeIfAbsent(
+                playerUuid, ignored -> new ConcurrentHashMap<String, Integer>());
         String dateKey = date.toString();
         if (count <= 0) {
             counts.remove(dateKey);
@@ -918,7 +1016,14 @@ implements StorageManager {
         } else {
             counts.put(dateKey, count);
         }
-        this.saveDailyRegisterLimits();
+        if (this.saveDailyRegisterLimits()) {
+            return;
+        }
+        if (snapshot == null || snapshot.isEmpty()) {
+            this.dailyRegisterLimitCache.remove(playerUuid);
+        } else {
+            this.dailyRegisterLimitCache.put(playerUuid, snapshot);
+        }
     }
 
     private void loadAllMoneyWarehouse() {
@@ -930,20 +1035,38 @@ implements StorageManager {
         for (String key : config.getKeys(false)) {
             ConfigurationSection sec = config.getConfigurationSection(key);
             if (sec == null) continue;
-            String playerUuid = sec.getString("player_uuid");
-            BigDecimal amount = new BigDecimal(sec.getString("amount", "0"));
-            if (playerUuid == null || amount.compareTo(BigDecimal.ZERO) <= 0) continue;
-            this.moneyWarehouseCache.put(playerUuid, this.moneyWarehouseCache.getOrDefault(playerUuid, BigDecimal.ZERO).add(amount));
+            try {
+                String playerUuid = sec.getString("player_uuid");
+                BigDecimal amount = new BigDecimal(sec.getString("amount", "0"));
+                if (playerUuid == null || amount.compareTo(BigDecimal.ZERO) <= 0) continue;
+                this.moneyWarehouseCache.put(playerUuid, this.moneyWarehouseCache.getOrDefault(playerUuid, BigDecimal.ZERO).add(amount));
+            } catch (RuntimeException ex) {
+                this.warnBadRecord("money warehouse", file.getName(), key, ex);
+            }
         }
     }
 
+    private void warnBadRecord(String type, String source, String key, RuntimeException exception) {
+        this.plugin.getLogger().warning("Skipping invalid " + type + " record " + source + "#" + key
+            + ": " + exception.getMessage());
+    }
+
     @Override
-    public void addToMoneyWarehouse(String playerUuid, BigDecimal amount) {
+    public boolean addToMoneyWarehouse(String playerUuid, BigDecimal amount) {
         if (playerUuid == null || amount == null || amount.compareTo(BigDecimal.ZERO) <= 0) {
-            return;
+            return false;
         }
-        this.moneyWarehouseCache.put(playerUuid, this.moneyWarehouseCache.getOrDefault(playerUuid, BigDecimal.ZERO).add(amount));
-        this.saveMoneyWarehouse();
+        BigDecimal previous = this.moneyWarehouseCache.getOrDefault(playerUuid, BigDecimal.ZERO);
+        this.moneyWarehouseCache.put(playerUuid, previous.add(amount));
+        if (this.saveMoneyWarehouse()) {
+            return true;
+        }
+        if (previous.compareTo(BigDecimal.ZERO) <= 0) {
+            this.moneyWarehouseCache.remove(playerUuid);
+        } else {
+            this.moneyWarehouseCache.put(playerUuid, previous);
+        }
+        return false;
     }
 
     @Override
@@ -966,8 +1089,11 @@ implements StorageManager {
         } else {
             this.moneyWarehouseCache.put(playerUuid, newBalance);
         }
-        this.saveMoneyWarehouse();
-        return true;
+        if (this.saveMoneyWarehouse()) {
+            return true;
+        }
+        this.moneyWarehouseCache.put(playerUuid, current);
+        return false;
     }
 
     private String getPlayerWarehouseKey(String playerUuid, String itemBase64) {
@@ -975,13 +1101,22 @@ implements StorageManager {
     }
 
     @Override
-    public void addToPlayerItemWarehouse(String playerUuid, String itemBase64, int quantity) {
+    public boolean addToPlayerItemWarehouse(String playerUuid, String itemBase64, int quantity) {
         if (playerUuid == null || itemBase64 == null || quantity <= 0) {
-            return;
+            return false;
         }
         String key = this.getPlayerWarehouseKey(playerUuid, itemBase64);
-        this.warehouseCache.put(key, this.warehouseCache.getOrDefault(key, 0) + quantity);
-        this.saveWarehouse();
+        int previous = this.warehouseCache.getOrDefault(key, 0);
+        this.warehouseCache.put(key, previous + quantity);
+        if (this.saveWarehouse()) {
+            return true;
+        }
+        if (previous <= 0) {
+            this.warehouseCache.remove(key);
+        } else {
+            this.warehouseCache.put(key, previous);
+        }
+        return false;
     }
 
     @Override
@@ -1015,11 +1150,14 @@ implements StorageManager {
         } else {
             this.warehouseCache.put(key, current - quantity);
         }
-        this.saveWarehouse();
-        return true;
+        if (this.saveWarehouse()) {
+            return true;
+        }
+        this.warehouseCache.put(key, current);
+        return false;
     }
 
-    private void saveMoneyWarehouse() {
+    private boolean saveMoneyWarehouse() {
         File file = new File(this.dataFolder, "moneywarehouse.yml");
         YamlConfiguration config = new YamlConfiguration();
         int index = 0;
@@ -1030,79 +1168,103 @@ implements StorageManager {
             config.set(key + ".amount", (Object)entry.getValue().toString());
             ++index;
         }
-        try {
-            config.save(file);
-        }
-        catch (IOException e) {
-            this.plugin.getLogger().severe("Failed to save money warehouse: " + e.getMessage());
-        }
+        return this.saveYamlAtomically(file, config, "money warehouse");
     }
 
     @Override
     public void withdrawWarehouse(Player player) {
+        if (player == null) {
+            return;
+        }
         String playerUuid = player.getUniqueId().toString();
         BigDecimal moneyBalance = this.moneyWarehouseCache.getOrDefault(playerUuid, BigDecimal.ZERO);
-        if (moneyBalance.compareTo(BigDecimal.ZERO) > 0) {
-            EconomyUtil.deposit(player.getUniqueId(), moneyBalance);
-            this.moneyWarehouseCache.remove(playerUuid);
-            this.saveMoneyWarehouse();
-            player.sendMessage("\u00a7a\u5df2\u63d0\u53d6 \u00a7f" + moneyBalance + " \u00a7a\u91d1\u5e01\u3002");
+        boolean withdrewMoney = false;
+        if (moneyBalance.compareTo(BigDecimal.ZERO) > 0
+            && this.takeFromMoneyWarehouse(playerUuid, moneyBalance)) {
+            if (EconomyUtil.deposit(player.getUniqueId(), moneyBalance)) {
+                withdrewMoney = true;
+                player.sendMessage("\u00a7a\u5df2\u63d0\u53d6 \u00a7f" + moneyBalance + " \u00a7a\u661f\u5149\u70b9\u3002");
+            } else if (!this.addToMoneyWarehouse(playerUuid, moneyBalance)) {
+                this.plugin.getLogger().severe("[AssetAudit] MONEY_WITHDRAW_ROLLBACK_FAILED player=" + playerUuid
+                    + " amount=" + moneyBalance);
+                player.sendMessage("\u00a7c\u661f\u5149\u70b9\u63d0\u53d6\u5931\u8d25\uff0c\u8bf7\u7acb\u5373\u8054\u7cfb\u7ba1\u7406\u5458\u3002");
+            } else {
+                player.sendMessage("\u00a7c\u5f53\u524d\u65e0\u6cd5\u53d1\u653e\u661f\u5149\u70b9\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u3002");
+            }
+        } else if (moneyBalance.compareTo(BigDecimal.ZERO) > 0) {
+            player.sendMessage("\u00a7c\u661f\u5149\u70b9\u4ed3\u5e93\u8bfb\u53d6\u5931\u8d25\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u3002");
         }
+
         int totalItems = 0;
-        HashMap<String, Integer> toRemove = new HashMap<String, Integer>();
-        for (Map.Entry<String, Integer> entry : this.warehouseCache.entrySet()) {
-            ItemStack itemStack;
-            if (entry.getValue() <= 0 || (itemStack = ItemSerializer.itemFromBase64(entry.getKey())) == null) continue;
-            int quantity = entry.getValue();
-            int added = InventoryDelivery.addUpTo(player, itemStack, quantity);
-            if (added > 0) {
-                toRemove.put(entry.getKey(), added);
-                totalItems += added;
-            }
-            if (added < quantity) {
-                player.sendMessage("\u00a7c\u80cc\u5305\u7a7a\u95f4\u4e0d\u8db3\uff0c\u90e8\u5206\u7269\u54c1\u65e0\u6cd5\u63d0\u53d6\u3002");
-                break;
-            }
-        }
-        for (Map.Entry<String, Integer> entry : toRemove.entrySet()) {
-            int current = this.warehouseCache.getOrDefault(entry.getKey(), 0);
-            int remaining = current - entry.getValue();
-            if (remaining <= 0) {
-                this.warehouseCache.remove(entry.getKey());
+        for (Map.Entry<String, Integer> entry : this.getPlayerItemWarehouse(playerUuid).entrySet()) {
+            ItemStack itemStack = ItemSerializer.itemFromBase64(entry.getKey());
+            int quantity = entry.getValue() == null ? 0 : entry.getValue();
+            if (itemStack == null || quantity <= 0 || !this.takeFromPlayerItemWarehouse(playerUuid, entry.getKey(), quantity)) {
                 continue;
             }
-            this.warehouseCache.put(entry.getKey(), remaining);
+            try {
+                int added = InventoryDelivery.addUpTo(player, itemStack, quantity);
+                int remaining = quantity - added;
+                if (remaining > 0 && !this.addToPlayerItemWarehouse(playerUuid, entry.getKey(), remaining)) {
+                    this.plugin.getLogger().severe("[AssetAudit] ITEM_WITHDRAW_RESTORE_FAILED player=" + playerUuid
+                        + " item=" + entry.getKey() + " quantity=" + remaining);
+                }
+                totalItems += added;
+            }
+            catch (Throwable throwable) {
+                if (!this.addToPlayerItemWarehouse(playerUuid, entry.getKey(), quantity)) {
+                    this.plugin.getLogger().severe("[AssetAudit] ITEM_WITHDRAW_ROLLBACK_FAILED player=" + playerUuid
+                        + " item=" + entry.getKey() + " quantity=" + quantity);
+                }
+            }
         }
         this.saveWarehouse();
         if (totalItems > 0) {
             player.sendMessage("\u00a7a\u5df2\u63d0\u53d6 \u00a7f" + totalItems + " \u00a7a\u4e2a\u7269\u54c1\u3002");
         }
-        if (moneyBalance.compareTo(BigDecimal.ZERO) <= 0 && totalItems <= 0) {
-            player.sendMessage("\u00a77\u4ed3\u5e93\u4e2d\u6ca1\u6709\u53ef\u63d0\u53d6\u7684\u7269\u54c1\u6216\u91d1\u5e01\u3002");
+        if (!withdrewMoney && totalItems <= 0) {
+            player.sendMessage("\u00a77\u4ed3\u5e93\u4e2d\u6ca1\u6709\u53ef\u63d0\u53d6\u7684\u7269\u54c1\u6216\u661f\u5149\u70b9\u3002");
         }
     }
 
     @Override
     public void withdrawWarehouseMoney(Player player) {
+        if (player == null) {
+            return;
+        }
         String playerUuid = player.getUniqueId().toString();
         BigDecimal moneyBalance = this.moneyWarehouseCache.getOrDefault(playerUuid, BigDecimal.ZERO);
         if (moneyBalance.compareTo(BigDecimal.ZERO) <= 0) {
-            player.sendMessage("\u00a77\u4ed3\u5e93\u4e2d\u6ca1\u6709\u53ef\u63d0\u53d6\u7684\u91d1\u5e01\u3002");
+            player.sendMessage("\u00a77\u4ed3\u5e93\u4e2d\u6ca1\u6709\u53ef\u63d0\u53d6\u7684\u661f\u5149\u70b9\u3002");
             return;
         }
-        EconomyUtil.deposit(player.getUniqueId(), moneyBalance);
-        this.moneyWarehouseCache.remove(playerUuid);
-        this.saveMoneyWarehouse();
-        player.sendMessage("\u00a7a\u5df2\u63d0\u53d6 \u00a7f" + moneyBalance + " \u00a7a\u91d1\u5e01\u3002");
+        if (!this.takeFromMoneyWarehouse(playerUuid, moneyBalance)) {
+            player.sendMessage("\u00a7c\u661f\u5149\u70b9\u4ed3\u5e93\u8bfb\u53d6\u5931\u8d25\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u3002");
+            return;
+        }
+        if (!EconomyUtil.deposit(player.getUniqueId(), moneyBalance)) {
+            if (!this.addToMoneyWarehouse(playerUuid, moneyBalance)) {
+                this.plugin.getLogger().severe("[AssetAudit] MONEY_WITHDRAW_ROLLBACK_FAILED player=" + playerUuid
+                    + " amount=" + moneyBalance);
+                player.sendMessage("\u00a7c\u661f\u5149\u70b9\u63d0\u53d6\u5931\u8d25\uff0c\u8bf7\u7acb\u5373\u8054\u7cfb\u7ba1\u7406\u5458\u3002");
+            } else {
+                player.sendMessage("\u00a7c\u5f53\u524d\u65e0\u6cd5\u53d1\u653e\u661f\u5149\u70b9\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u3002");
+            }
+            return;
+        }
+        player.sendMessage("\u00a7a\u5df2\u63d0\u53d6 \u00a7f" + moneyBalance + " \u00a7a\u661f\u5149\u70b9\u3002");
     }
 
     @Override
     public void withdrawWarehouseItem(Player player, String itemBase64) {
-        if (itemBase64 == null || itemBase64.isEmpty()) {
-            player.sendMessage("\u00a7c\u65e0\u6548\u7684\u4ed3\u5e93\u7269\u54c1\u3002");
+        if (player == null || itemBase64 == null || itemBase64.isEmpty()) {
+            if (player != null) {
+                player.sendMessage("\u00a7c\u65e0\u6548\u7684\u4ed3\u5e93\u7269\u54c1\u3002");
+            }
             return;
         }
-        int quantity = this.warehouseCache.getOrDefault(itemBase64, 0);
+        String playerUuid = player.getUniqueId().toString();
+        int quantity = this.getPlayerItemWarehouse(playerUuid).getOrDefault(itemBase64, 0);
         if (quantity <= 0) {
             player.sendMessage("\u00a77\u8be5\u7269\u54c1\u5df2\u88ab\u63d0\u53d6\u6216\u4e0d\u5b58\u5728\u3002");
             return;
@@ -1112,19 +1274,99 @@ implements StorageManager {
             player.sendMessage("\u00a7c\u7269\u54c1\u6570\u636e\u635f\u574f\uff0c\u65e0\u6cd5\u63d0\u53d6\u3002");
             return;
         }
-        int added = InventoryDelivery.addUpTo(player, itemStack, quantity);
-        if (added <= 0) {
-            player.sendMessage("\u00a7c\u80cc\u5305\u7a7a\u95f4\u4e0d\u8db3\uff0c\u65e0\u6cd5\u63d0\u53d6\u8be5\u7269\u54c1\u3002");
+        if (!this.takeFromPlayerItemWarehouse(playerUuid, itemBase64, quantity)) {
+            player.sendMessage("\u00a7c\u4ed3\u5e93\u6570\u636e\u53d8\u66f4\u5931\u8d25\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u3002");
             return;
         }
-        int remaining = quantity - added;
-        if (remaining <= 0) {
-            this.warehouseCache.remove(itemBase64);
-        } else {
-            this.warehouseCache.put(itemBase64, remaining);
-            player.sendMessage("\u00a7c\u80cc\u5305\u7a7a\u95f4\u4e0d\u8db3\uff0c\u90e8\u5206\u7269\u54c1\u672a\u63d0\u53d6\u3002");
+        try {
+            int added = InventoryDelivery.addUpTo(player, itemStack, quantity);
+            int remaining = quantity - added;
+            if (remaining > 0 && !this.addToPlayerItemWarehouse(playerUuid, itemBase64, remaining)) {
+                this.plugin.getLogger().severe("[AssetAudit] ITEM_WITHDRAW_RESTORE_FAILED player=" + playerUuid
+                    + " item=" + itemBase64 + " quantity=" + remaining);
+                player.sendMessage("\u00a7c\u672a\u80fd\u56de\u5b58\u5269\u4f59\u7269\u54c1\uff0c\u8bf7\u7acb\u5373\u8054\u7cfb\u7ba1\u7406\u5458\u3002");
+            }
+            player.sendMessage("\u00a7a\u5df2\u63d0\u53d6 \u00a7f" + added + " \u00a7a\u4e2a\u7269\u54c1"
+                + (remaining > 0 ? "\uff0c\u5269\u4f59 " + remaining + " \u4e2a\u4fdd\u7559\u5728\u4ed3\u5e93\u3002" : "\u3002"));
         }
-        this.saveWarehouse();
-        player.sendMessage("\u00a7a\u5df2\u63d0\u53d6 \u00a7f" + added + " \u00a7a\u4e2a\u7269\u54c1\u3002");
+        catch (Throwable throwable) {
+            if (!this.addToPlayerItemWarehouse(playerUuid, itemBase64, quantity)) {
+                this.plugin.getLogger().severe("[AssetAudit] ITEM_WITHDRAW_ROLLBACK_FAILED player=" + playerUuid
+                    + " item=" + itemBase64 + " quantity=" + quantity);
+                player.sendMessage("\u00a7c\u7269\u54c1\u63d0\u53d6\u53d1\u751f\u5f02\u5e38\uff0c\u4e14\u65e0\u6cd5\u81ea\u52a8\u56de\u5b58\uff0c\u8bf7\u7acb\u5373\u8054\u7cfb\u7ba1\u7406\u5458\u3002");
+            } else {
+                player.sendMessage("\u00a7c\u7269\u54c1\u63d0\u53d6\u5931\u8d25\uff0c\u5df2\u8fd4\u56de\u4ed3\u5e93\u3002");
+            }
+        }
+    }
+
+    private boolean saveYamlAtomically(File target, YamlConfiguration config, String description) {
+        File parent = target.getParentFile();
+        if (parent != null && !parent.exists() && !parent.mkdirs()) {
+            this.plugin.getLogger().severe("Failed to create directory for " + description + ".");
+            return false;
+        }
+        File temporary = new File(parent, target.getName() + ".tmp-" + System.nanoTime());
+        File backup = new File(parent, target.getName() + ".bak-" + System.nanoTime());
+        boolean movedOld = false;
+        try {
+            config.save(temporary);
+            if (target.exists()) {
+                this.movePath(target, backup);
+                movedOld = true;
+            }
+            this.movePath(temporary, target);
+            if (movedOld && backup.exists() && !backup.delete()) {
+                this.plugin.getLogger().warning("Failed to remove old " + description + " backup.");
+            }
+            return true;
+        }
+        catch (IOException e) {
+            if (movedOld && !target.exists() && backup.exists()) {
+                try {
+                    this.movePath(backup, target);
+                }
+                catch (IOException restoreFailure) {
+                    e.addSuppressed(restoreFailure);
+                }
+            }
+            this.plugin.getLogger().severe("Failed to save " + description + ": " + e.getMessage());
+            return false;
+        }
+        finally {
+            if (temporary.exists()) {
+                temporary.delete();
+            }
+            if (backup.exists() && target.exists()) {
+                backup.delete();
+            }
+        }
+    }
+
+    private void movePath(File source, File target) throws IOException {
+        Path sourcePath = source.toPath();
+        Path targetPath = target.toPath();
+        try {
+            Files.move(sourcePath, targetPath, StandardCopyOption.ATOMIC_MOVE);
+        }
+        catch (AtomicMoveNotSupportedException e) {
+            Files.move(sourcePath, targetPath);
+        }
+    }
+
+    private boolean deleteTree(File directory) {
+        File[] children = directory.listFiles();
+        if (children != null) {
+            for (File child : children) {
+                if (child.isDirectory()) {
+                    if (!this.deleteTree(child)) {
+                        return false;
+                    }
+                } else if (!child.delete()) {
+                    return false;
+                }
+            }
+        }
+        return directory.delete() || !directory.exists();
     }
 }

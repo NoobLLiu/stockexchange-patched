@@ -1,6 +1,7 @@
 package com.github.exchange.gui;
 
 import com.github.exchange.model.Order;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 
@@ -16,6 +17,14 @@ public final class MarketListingLayoutTest {
         assert slots.get(2).order() == large && slots.get(2).amount() == 2;
         assert slots.get(3).order() == partial && slots.get(3).amount() == 64;
         assert slots.get(4).order() == partial && slots.get(4).amount() == 35;
+
+        List<MarketListingLayout.Slot> unstackable = MarketListingLayout.expand(List.of(order(3, 3, 0)), 1);
+        assert unstackable.size() == 3 : "unstackable items must occupy one slot each";
+        assert unstackable.stream().allMatch(slot -> slot.amount() == 1);
+
+        assert MarketListingLayout.pageCount(slotsFor(45), 45) == 1;
+        assert MarketListingLayout.pageCount(slotsFor(46), 45) == 2;
+        assert MarketListingLayout.pageCount(slotsFor(90), 45) == 2;
     }
 
     private static Order order(int id, int quantity, int filledQty) {
@@ -24,5 +33,13 @@ public final class MarketListingLayoutTest {
         order.setQuantity(quantity);
         order.setFilledQty(filledQty);
         return order;
+    }
+
+    private static List<MarketListingLayout.Slot> slotsFor(int count) {
+        List<Order> orders = new ArrayList<Order>();
+        for (int i = 0; i < count; ++i) {
+            orders.add(order(i + 1, 1, 0));
+        }
+        return MarketListingLayout.expand(orders);
     }
 }

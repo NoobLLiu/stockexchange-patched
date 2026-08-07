@@ -5,6 +5,7 @@ package com.github.exchange.model;
 
 import java.math.BigDecimal;
 import java.sql.Timestamp;
+import java.util.UUID;
 
 public class Trade {
     private int id;
@@ -36,6 +37,41 @@ public class Trade {
         this.buyOrderId = buyOrderId;
         this.sellOrderId = sellOrderId;
         this.tradedAt = tradedAt;
+    }
+
+    public boolean isPersistable() {
+        if (this.id <= 0
+            || this.itemId <= 0
+            || !this.isUuid(this.buyerUuid)
+            || !this.isUuid(this.sellerUuid)
+            || this.buyerUuid.equals(this.sellerUuid)
+            || this.price == null
+            || this.price.compareTo(BigDecimal.ZERO) <= 0
+            || this.quantity <= 0
+            || this.totalAmount == null
+            || this.totalAmount.compareTo(BigDecimal.ZERO) < 0
+            || this.buyerFee == null
+            || this.buyerFee.compareTo(BigDecimal.ZERO) < 0
+            || this.sellerFee == null
+            || this.sellerFee.compareTo(BigDecimal.ZERO) < 0
+            || this.buyOrderId < 0
+            || this.sellOrderId < 0
+            || this.tradedAt == null) {
+            return false;
+        }
+        return true;
+    }
+
+    private boolean isUuid(String value) {
+        if (value == null || value.isBlank()) {
+            return false;
+        }
+        try {
+            UUID.fromString(value);
+            return true;
+        } catch (IllegalArgumentException exception) {
+            return false;
+        }
     }
 
     public int getId() {
