@@ -530,12 +530,13 @@ implements StorageManager {
         if (!this.prepareForOperation(false)) {
             return false;
         }
-        String sql = "UPDATE orders SET filled_qty=?, status=?, updated_at=? WHERE id=?";
+        String sql = "UPDATE orders SET quantity=?, filled_qty=?, status=?, updated_at=? WHERE id=?";
         try (PreparedStatement ps = this.connection.prepareStatement(sql);){
-            ps.setInt(1, order.getFilledQty());
-            ps.setString(2, order.getStatus().name());
-            ps.setLong(3, System.currentTimeMillis());
-            ps.setInt(4, order.getId());
+            ps.setInt(1, order.getQuantity());
+            ps.setInt(2, order.getFilledQty());
+            ps.setString(3, order.getStatus().name());
+            ps.setLong(4, System.currentTimeMillis());
+            ps.setInt(5, order.getId());
             if (ps.executeUpdate() <= 0) {
                 return false;
             }

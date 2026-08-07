@@ -1087,7 +1087,8 @@ implements Listener {
                     boolean ownOrder = buyOrder.getPlayerUuid().equals(player.getUniqueId().toString());
                     if (ownOrder) {
                         meta.setEnchantmentGlintOverride(true);
-                        lore.add("\u00a7e\u70b9\u51fb\u53d6\u6d88\u8be5\u6c42\u8d2d\u5355");
+                        lore.add("\u00a7e\u5de6\u952e: \u51cf\u5c11 1 \u4e2a\u6c42\u8d2d");
+                        lore.add("\u00a7eShift+\u5de6\u952e: \u53d6\u6d88\u672c\u683c\u5168\u90e8\u6c42\u8d2d");
                     } else {
                         lore.add("\u00a7e\u70b9\u51fb\u4f9b\u8d27 1 \u4e2a");
                         lore.add("\u00a7eShift+\u5de6\u952e: \u6309\u672c\u683c\u6570\u91cf\u4f9b\u8d27\uff08\u80cc\u5305\u4e0d\u8db3\u5219\u6709\u591a\u5c11\u4f9b\u591a\u5c11\uff09");
@@ -1159,7 +1160,8 @@ implements Listener {
                     boolean ownOrder = sellOrder.getPlayerUuid().equals(player.getUniqueId().toString());
                     if (ownOrder) {
                         meta.setEnchantmentGlintOverride(true);
-                        lore.add("\u00a7e\u70b9\u51fb\u4e0b\u67b6\u5e76\u53d6\u56de\u8be5\u5356\u5355");
+                        lore.add("\u00a7e\u5de6\u952e: \u53d6\u56de 1 \u4e2a");
+                        lore.add("\u00a7eShift+\u5de6\u952e: \u53d6\u56de\u672c\u683c\u5168\u90e8\u5546\u54c1");
                     } else {
                         if (bulk) {
                             lore.add("\u00a7e\u70b9\u51fb\u8d2d\u4e70 " + displayedQuantity + " \u4e2a");
@@ -1757,8 +1759,14 @@ implements Listener {
                         Order clickedOrder = plugin.getOrderManager().getOrder(orderId);
                         if (clickedOrder == null) break;
                         if (clickedOrder.getPlayerUuid().equals(clicker.getUniqueId().toString())) {
-                            String result = plugin.getOrderManager().cancelOrder(clicker, orderId);
-                            clicker.sendMessage(result);
+                            if (event.getClick() == ClickType.SHIFT_LEFT) {
+                                int slotQty = ExchangeGUI.readDisplayedQuantity(meta);
+                                clicker.sendMessage(plugin.getOrderManager().withdrawOrderQuantity(clicker, orderId, slotQty));
+                            } else if (event.getClick() == ClickType.LEFT) {
+                                clicker.sendMessage(plugin.getOrderManager().withdrawOrderQuantity(clicker, orderId, 1));
+                            } else {
+                                break;
+                            }
                         } else if (event.getClick() == ClickType.SHIFT_LEFT) {
                             int slotQty = ExchangeGUI.readDisplayedQuantity(meta);
                             String result;

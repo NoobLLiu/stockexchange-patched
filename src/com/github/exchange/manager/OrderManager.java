@@ -842,6 +842,89 @@ public class OrderManager {
         return "\u00a7a\u8ba2\u5355 #" + orderId + " \u5df2\u53d6\u6d88\uff0c\u8d44\u4ea7\u5df2\u9000\u56de\u3002";
     }
 
+    public synchronized String withdrawOrderQuantity(Player player, int orderId, int quantity) {
+        if (player == null) {
+            return "\u00a7c\u53ea\u6709\u73a9\u5bb6\u53ef\u4ee5\u53d6\u56de\u6302\u5355\u3002";
+        }
+        if (quantity <= 0) {
+            return "\u00a7c\u53d6\u56de\u6570\u91cf\u5fc5\u987b\u5927\u4e8e 0\u3002";
+        }
+        if (this.plugin.isGrowthAccessRestricted(player)) {
+            return this.plugin.growthAccessMessage(player);
+        }
+        Order order = this.plugin.getStorageManager().getOrder(orderId);
+        if (order == null) {
+            return "\u00a7c\u8ba2\u5355\u4e0d\u5b58\u5728\u3002";
+        }
+        if (!order.getPlayerUuid().equals(player.getUniqueId().toString()) && !player.hasPermission("exchange.admin")) {
+            return "\u00a7c\u8fd9\u4e0d\u662f\u4f60\u7684\u8ba2\u5355\u3002";
+        }
+        if (!order.isActive()) {
+            return "\u00a7c\u8ba2\u5355\u5df2\u7ed3\u675f\uff0c\u65e0\u6cd5\u53d6\u56de\u3002";
+        }
+        int remaining = order.getRemainingQty();
+        if (remaining <= 0) {
+            return "\u00a7c\u8ba2\u5355\u6ca1\u6709\u53ef\u53d6\u56de\u7684\u8d44\u4ea7\u3002";
+        }
+        int withdraw = Math.min(quantity, remaining);
+        if (withdraw >= remaining) {
+            return this.cancelOrder(player, orderId);
+        }
+        if (order.getOrderType() == Order.OrderType.SELL) {
+            EscrowEntry escrow = this.plugin.getStorageManager().getEscrow(order.getId(), EscrowEntry.AssetType.ITEM);
+            if (!this.isValidSellEscrow(order, escrow)) {
+                this.plugin.getLogger().severe("[AssetAudit] SELL_PARTIAL_WITHDRAW_BLOCKED player=" + player.getUniqueId()
+                    + " order=" + orderId + " remaining=" + remaining
+                    + " escrow=" + (escrow == null ? "missing" : escrow.getQuantity()));
+                return "\u00a7c\u8be5\u5356\u5355\u7684\u6258\u7ba1\u6570\u636e\u5f02\u5e38\uff0c\u5df2\u963b\u6b62\u9000\u6b3e\u5e76\u8bb0\u5f55\u65e5\u5fd7\uff0c\u8bf7\u8054\u7cfb\u7ba1\u7406\u5458\u3002";
+            }
+            Order next = this.copyOrder(order);
+            next.setQuantity(remaining - withdraw);
+            if (!this.plugin.getStorageManager().updateOrder(next)) {
+                return "\u00a7c\u8ba2\u5355\u72b6\u6001\u4fdd\u5b58\u5931\u8d25\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u3002";
+            }
+            EscrowEntry nextEscrow = this.copyEscrow(escrow);
+            nextEscrow.setQuantity(escrow.getQuantity() - withdraw);
+            if (!this.plugin.getStorageManager().insertEscrow(nextEscrow)
+                || !this.deliverMatchedItems(this.parseUuid(order.getPlayerUuid()), escrow.getItemBase64(), withdraw)) {
+                this.plugin.getStorageManager().updateOrder(order);
+                this.restoreEscrowState(escrow);
+                return "\u00a7c\u53d6\u56de\u5931\u8d25\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u3002";
+            }
+            this.plugin.getLogger().info("[AssetAudit] SELL_PARTIAL_WITHDRAW player=" + player.getUniqueId()
+                + " order=" + orderId + " item=" + order.getItemId() + " refund=" + withdraw);
+            return "\u00a7a\u5df2\u53d6\u56de " + withdraw + " \u4e2a\u7269\u54c1\uff0c\u5356\u5355 #" + orderId
+                + " \u5269\u4f59 " + (remaining - withdraw) + " \u4e2a\u3002";
+        }
+        BigDecimal refund = order.getPrice().multiply(BigDecimal.valueOf(withdraw));
+        BigDecimal required = order.getPrice().multiply(BigDecimal.valueOf(remaining));
+        EscrowEntry escrow = this.plugin.getStorageManager().getEscrow(order.getId(), EscrowEntry.AssetType.MONEY);
+        if (!this.isValidMoneyEscrow(order, escrow, required)) {
+            this.plugin.getLogger().severe("[AssetAudit] BUY_PARTIAL_WITHDRAW_BLOCKED player=" + player.getUniqueId()
+                + " order=" + orderId + " remaining=" + remaining
+                + " escrow=" + (escrow == null ? "missing" : escrow.getAmount()));
+            return "\u00a7c\u8be5\u6c42\u8d2d\u5355\u7684\u6258\u7ba1\u6570\u636e\u5f02\u5e38\uff0c\u5df2\u963b\u6b62\u9000\u6b3e\u5e76\u8bb0\u5f55\u65e5\u5fd7\uff0c\u8bf7\u8054\u7cfb\u7ba1\u7406\u5458\u3002";
+        }
+        Order next = this.copyOrder(order);
+        next.setQuantity(remaining - withdraw);
+        if (!this.plugin.getStorageManager().updateOrder(next)) {
+            return "\u00a7c\u8ba2\u5355\u72b6\u6001\u4fdd\u5b58\u5931\u8d25\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u3002";
+        }
+        EscrowEntry nextEscrow = this.copyEscrow(escrow);
+        nextEscrow.setAmount(escrow.getAmount().subtract(refund));
+        if (!this.plugin.getStorageManager().insertEscrow(nextEscrow)
+            || !this.deliverRefundedMoney(this.parseUuid(order.getPlayerUuid()), refund)) {
+            this.plugin.getStorageManager().updateOrder(order);
+            this.restoreEscrowState(escrow);
+            return "\u00a7c\u53d6\u56de\u5931\u8d25\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u3002";
+        }
+        this.plugin.getLogger().info("[AssetAudit] BUY_PARTIAL_WITHDRAW player=" + player.getUniqueId()
+            + " order=" + orderId + " item=" + order.getItemId() + " refund=" + refund.toPlainString());
+        return "\u00a7a\u5df2\u51cf\u5c11 " + withdraw + " \u4e2a\u6c42\u8d2d\uff0c\u9000\u56de " + refund.toPlainString()
+            + " " + this.plugin.getCurrencyName() + "\uff0c\u6c42\u8d2d\u5355 #" + orderId
+            + " \u5269\u4f59 " + (remaining - withdraw) + " \u4e2a\u3002";
+    }
+
     private void matchOrder(Order newOrder) {
         if (newOrder == null || !newOrder.isActive()) {
             return;
