@@ -15,6 +15,7 @@ import com.github.exchange.model.Order;
 import com.github.exchange.model.Trade;
 import com.github.exchange.util.EconomyUtil;
 import com.github.exchange.util.InventoryDelivery;
+import com.github.exchange.util.ItemDisplayNames;
 import com.github.exchange.util.ItemSerializer;
 import com.github.exchange.util.MarketGuiItem;
 import com.github.exchange.util.SpecialCategory;
@@ -1828,7 +1829,34 @@ public class OrderManager {
         }
         this.copySettledOrder(buyOrder, settledBuyOrder);
         this.copySettledOrder(sellOrder, settledSellOrder);
+        this.notifyMatchParties(buyOrder, sellOrder, deliveredItemBase64, quantity, sellerReceives);
         return true;
+    }
+
+    private void notifyMatchParties(Order buyOrder, Order sellOrder, String itemBase64, int quantity,
+                                    BigDecimal sellerReceives) {
+        try {
+            String itemName = "#" + buyOrder.getItemId();
+            ItemStack item = ItemSerializer.itemFromBase64(itemBase64);
+            if (item != null) {
+                itemName = ItemDisplayNames.resolve(item);
+            }
+            UUID buyerUuid = this.parseUuid(buyOrder.getPlayerUuid());
+            UUID sellerUuid = this.parseUuid(sellOrder.getPlayerUuid());
+            if (buyerUuid != null) {
+                this.plugin.getTradeNoticeBuffer().passive(buyerUuid,
+                    "\u00a7a\u4f60\u6c42\u8d2d\u7684\u300c" + itemName + "\u300d x" + quantity + " \u5df2\u5230\u8d27\u3002");
+            }
+            if (sellerUuid != null) {
+                this.plugin.getTradeNoticeBuffer().passive(sellerUuid,
+                    "\u00a7a\u4f60\u7684\u300c" + itemName + "\u300d x" + quantity
+                    + " \u5df2\u552e\u51fa\uff0c\u83b7\u5f97 " + sellerReceives.toPlainString()
+                    + " " + this.plugin.getCurrencyName() + "\u3002");
+            }
+        }
+        catch (Throwable throwable) {
+            this.plugin.getLogger().warning("[Notifier] passive notice failed: " + throwable.getMessage());
+        }
     }
 
     private boolean deliverMatchedItems(UUID buyerUuid, String itemBase64, int quantity) {
@@ -1855,7 +1883,6 @@ public class OrderManager {
         }
         Player seller = Bukkit.getPlayer(sellerUuid);
         if (seller != null && seller.isOnline() && EconomyUtil.deposit(sellerUuid, amount)) {
-            seller.sendMessage("\u00a7a\u4f60\u552e\u51fa\u7269\u54c1\u83b7\u5f97\u4e86 " + amount.toPlainString() + " " + this.plugin.getCurrencyName() + "\u3002");
             return new MoneyDeliveryReceipt(sellerUuid, amount, true);
         }
         if (this.plugin.getStorageManager().addToMoneyWarehouse(sellerUuid.toString(), amount)) {
@@ -2210,7 +2237,8 @@ public class OrderManager {
         }
         Player player = Bukkit.getPlayer(playerUuid);
         if (player != null && player.isOnline() && EconomyUtil.deposit(playerUuid, amount)) {
-            player.sendMessage("\u00a7a\u5df2\u9000\u8fd8 " + amount.toPlainString() + " " + this.plugin.getCurrencyName() + "\u3002");
+            this.plugin.getTradeNoticeBuffer().manual(playerUuid,
+                "\u00a7a\u5df2\u9000\u8fd8 " + amount.toPlainString() + " " + this.plugin.getCurrencyName() + "\u3002");
             return true;
         }
         return this.plugin.getStorageManager().addToMoneyWarehouse(playerUuid.toString(), amount);

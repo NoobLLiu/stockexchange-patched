@@ -794,10 +794,10 @@ implements Listener {
             ExchangeGUI.returnListingItems(player, remaining);
         }
         if (listed > 0) {
-            player.sendMessage("\u00a7a\u4e0a\u67b6\u5b8c\u6210\uff1a\u5171 " + listed
+            plugin.getTradeNoticeBuffer().manual(player, "\u00a7a\u4e0a\u67b6\u5b8c\u6210\uff1a\u5171 " + listed
                 + " \u4e2a\u7269\u54c1\u4ee5\u5355\u4ef7 " + price + " \u4e0a\u67b6\u3002");
         } else {
-            player.sendMessage("\u00a7c\u6ca1\u6709\u4efb\u4f55\u7269\u54c1\u4e0a\u67b6\u6210\u529f\u3002");
+            plugin.getTradeNoticeBuffer().manual(player, "\u00a7c\u6ca1\u6709\u4efb\u4f55\u7269\u54c1\u4e0a\u67b6\u6210\u529f\u3002");
         }
         ExchangeGUI.openItemList(plugin, player);
     }
@@ -1711,7 +1711,7 @@ implements Listener {
                     if (quickId == null || (itemQuick = plugin.getItemManager().getItem(quickId)) == null) break;
                     if (plugin.getItemManager().getSpecialCategory(itemQuick) != null) break;
                     String result = plugin.getOrderManager().quickSellAll(clicker, itemQuick);
-                    clicker.sendMessage(result);
+                    plugin.getTradeNoticeBuffer().manual(clicker, result);
                     guiNavigating.put(uuid, true);
                     ExchangeGUI.openItemDetail(
                         plugin,
@@ -1725,7 +1725,8 @@ implements Listener {
                     ExchangeItem supplyItem;
                     Integer supplyId = guiItemId.get(uuid);
                     if (supplyId == null || (supplyItem = plugin.getItemManager().getItem(supplyId)) == null) break;
-                    clicker.sendMessage(plugin.getOrderManager().supplyAllToBuyOrders(clicker, supplyItem));
+                    plugin.getTradeNoticeBuffer().manual(clicker,
+                        plugin.getOrderManager().supplyAllToBuyOrders(clicker, supplyItem));
                     guiNavigating.put(uuid, true);
                     ExchangeGUI.openItemDetail(
                         plugin,
@@ -1761,9 +1762,11 @@ implements Listener {
                         if (clickedOrder.getPlayerUuid().equals(clicker.getUniqueId().toString())) {
                             if (event.getClick() == ClickType.SHIFT_LEFT) {
                                 int slotQty = ExchangeGUI.readDisplayedQuantity(meta);
-                                clicker.sendMessage(plugin.getOrderManager().withdrawOrderQuantity(clicker, orderId, slotQty));
+                                plugin.getTradeNoticeBuffer().manual(clicker,
+                                    plugin.getOrderManager().withdrawOrderQuantity(clicker, orderId, slotQty));
                             } else if (event.getClick() == ClickType.LEFT) {
-                                clicker.sendMessage(plugin.getOrderManager().withdrawOrderQuantity(clicker, orderId, 1));
+                                plugin.getTradeNoticeBuffer().manual(clicker,
+                                    plugin.getOrderManager().withdrawOrderQuantity(clicker, orderId, 1));
                             } else {
                                 break;
                             }
@@ -1785,7 +1788,7 @@ implements Listener {
                             } else {
                                 result = plugin.getOrderManager().directBuyFromSellOrder(clicker, orderId, slotQty);
                             }
-                            clicker.sendMessage(result);
+                            plugin.getTradeNoticeBuffer().manual(clicker, result);
                         } else {
                             boolean bulk = bulkBuyMode.getOrDefault(uuid, false);
                             int qty = clickedOrder.getOrderType() == Order.OrderType.BUY
@@ -1797,7 +1800,7 @@ implements Listener {
                             } else {
                                 result = plugin.getOrderManager().directBuyFromSellOrder(clicker, orderId, qty);
                             }
-                            clicker.sendMessage(result);
+                            plugin.getTradeNoticeBuffer().manual(clicker, result);
                         }
                         Integer currentItemId = guiItemId.get(uuid);
                         ExchangeItem currentItem = currentItemId == null ? null : plugin.getItemManager().getItem(currentItemId);
@@ -1849,7 +1852,7 @@ implements Listener {
                         try {
                             int orderId = Integer.parseInt(part.substring(1));
                             String result = plugin.getOrderManager().cancelOrder(clicker, orderId);
-                            clicker.sendMessage(result);
+                            plugin.getTradeNoticeBuffer().manual(clicker, result);
                             guiNavigating.put(uuid, true);
                             ExchangeGUI.openMyHistory(plugin, clicker, guiPage.getOrDefault(uuid, 1));
                         }

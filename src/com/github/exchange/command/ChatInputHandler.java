@@ -280,7 +280,7 @@ implements Listener {
         } else {
             result = this.plugin.getOrderManager().placeSellOrder(player, exchangeItem, price, quantity);
         }
-        player.sendMessage(result);
+        this.plugin.getTradeNoticeBuffer().manual(player, result);
     }
 
     public void startAddItemSearchInput(Player player) {

@@ -28,6 +28,7 @@ import com.github.exchange.manager.ItemManager;
 import com.github.exchange.manager.OrderManager;
 import com.github.exchange.manager.SellBuyerTracker;
 import com.github.exchange.manager.TradeManager;
+import com.github.exchange.notify.TradeNoticeBuffer;
 import com.github.exchange.storage.FileStorageManager;
 import com.github.exchange.storage.MySQLStorageManager;
 import com.github.exchange.storage.StorageManager;
@@ -96,6 +97,7 @@ extends JavaPlugin {
     private final List<String> announcements = new ArrayList<String>();
     private MailService mailService;
     private WebMarketManager webMarketManager;
+    private TradeNoticeBuffer tradeNoticeBuffer;
 
 
     public void onEnable() {
@@ -131,6 +133,7 @@ extends JavaPlugin {
             this.getLogger()
         );
         this.sellBuyerTracker.load();
+        this.tradeNoticeBuffer = new TradeNoticeBuffer(this);
         this.chatInputHandler = new ChatInputHandler(this);
         this.itemDatabase = new ItemDatabase(this.getLogger());
         this.webMarketManager = new WebMarketManager(this);
@@ -160,6 +163,9 @@ extends JavaPlugin {
     }
 
     public void onDisable() {
+        if (this.tradeNoticeBuffer != null) {
+            this.tradeNoticeBuffer.flushAll();
+        }
         if (this.marketCleanupTask != null) {
             this.marketCleanupTask.cancel();
             this.marketCleanupTask = null;
@@ -171,6 +177,10 @@ extends JavaPlugin {
             this.sellBuyerTracker.save();
         }
         this.getLogger().info("StockExchange disabled!");
+    }
+
+    public TradeNoticeBuffer getTradeNoticeBuffer() {
+        return this.tradeNoticeBuffer;
     }
 
     private boolean setupEconomy() {

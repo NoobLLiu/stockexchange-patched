@@ -24,7 +24,10 @@ public class SettlementDeliveryListener implements Listener {
     @EventHandler
     public void onPlayerJoin(PlayerJoinEvent event) {
         Player player = event.getPlayer();
-        this.plugin.getServer().getScheduler().runTaskLater(this.plugin, () -> this.deliverPendingAssets(player), 20L);
+        this.plugin.getServer().getScheduler().runTaskLater(this.plugin, () -> {
+            this.deliverPendingAssets(player);
+            this.plugin.getTradeNoticeBuffer().flushOffline(player);
+        }, 20L);
     }
 
     private void deliverPendingAssets(Player player) {
