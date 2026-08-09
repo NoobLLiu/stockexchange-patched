@@ -25,7 +25,7 @@ tax:
   system_account: ""
 
 price_limit:
-  enabled: true
+  enabled: false
   limit_up_percent: 10.0
   limit_down_percent: 10.0
 

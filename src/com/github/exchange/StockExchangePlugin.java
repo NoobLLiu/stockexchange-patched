@@ -225,7 +225,7 @@ extends JavaPlugin {
             this.getConfig().set("fees", null);
             this.saveConfig();
         }
-        this.priceLimitEnabled = this.getConfig().getBoolean("price_limit.enabled", true);
+        this.priceLimitEnabled = this.getConfig().getBoolean("price_limit.enabled", false);
         this.limitUpPercent = Math.max(0.0, this.finiteConfig("price_limit.limit_up_percent", 10.0));
         this.limitDownPercent = Math.max(0.0, this.finiteConfig("price_limit.limit_down_percent", 10.0));
         this.guiUpdateIntervalTicks = Math.max(1, this.getConfig().getInt("gui.update_interval_ticks", 20));

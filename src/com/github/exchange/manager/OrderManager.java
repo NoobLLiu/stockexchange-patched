@@ -67,7 +67,7 @@ public class OrderManager {
     }
 
     private synchronized String placeSellOrderInternal(Player player, ExchangeItem exchangeItem, ItemStack actualItem, BigDecimal price, int quantity, boolean fromReserved) {
-        SellOrderCreation creation = this.createSellOrderAndEscrow(player, exchangeItem, actualItem, price, quantity, fromReserved, true);
+        SellOrderCreation creation = this.createSellOrderAndEscrow(player, exchangeItem, actualItem, price, quantity, fromReserved);
         if (creation.order == null) {
             return creation.error;
         }
@@ -83,7 +83,7 @@ public class OrderManager {
         return "\u00a7a\u5356\u5355 #" + order.getId() + " \u5df2\u521b\u5efa\uff01\u5355\u4ef7: " + price + ", \u6570\u91cf: " + quantity;
     }
 
-    private SellOrderCreation createSellOrderAndEscrow(Player player, ExchangeItem exchangeItem, ItemStack actualItem, BigDecimal price, int quantity, boolean fromReserved, boolean enforcePriceLimit) {
+    private SellOrderCreation createSellOrderAndEscrow(Player player, ExchangeItem exchangeItem, ItemStack actualItem, BigDecimal price, int quantity, boolean fromReserved) {
         if (player == null || exchangeItem == null) {
             return new SellOrderCreation(null, "\u00a7c\u65e0\u6548\u7684\u73a9\u5bb6\u6216\u5546\u54c1\u3002", null);
         }
@@ -103,9 +103,6 @@ public class OrderManager {
         ItemStatus status = this.plugin.getItemManager().getItemStatus(exchangeItem.getId());
         if (status != null && status.isSuspended()) {
             return new SellOrderCreation(null, "\u00a7c\u8be5\u54c1\u79cd\u5df2\u505c\u724c\uff0c\u65e0\u6cd5\u6302\u5355\u3002", null);
-        }
-        if (enforcePriceLimit && status != null && !this.plugin.getItemManager().isPriceWithinLimit(status, price)) {
-            return new SellOrderCreation(null, "\u00a7c\u8be5\u4ef7\u683c\u8d85\u51fa\u5f53\u524d\u4ef7\u683c\u6ce2\u52a8\u9650\u5236\u3002", null);
         }
         ItemStack itemStack = actualItem != null ? actualItem : ItemSerializer.itemFromBase64(exchangeItem.getItemBase64());
         if (itemStack == null) {
@@ -411,7 +408,7 @@ public class OrderManager {
             return "\u00a7c\u7269\u54c1\u53cd\u5e8f\u5217\u5316\u5931\u8d25\u3002";
         }
         SellOrderCreation creation = this.createSellOrderAndEscrow(
-            player, exchangeItem, itemStack, buyOrder.getPrice(), quantity, false, false);
+            player, exchangeItem, itemStack, buyOrder.getPrice(), quantity, false);
         if (creation.order == null) {
             return creation.error;
         }
@@ -475,7 +472,7 @@ public class OrderManager {
             while (orderRemaining > 0) {
                 int chunk = Math.min(orderRemaining, this.plugin.getMaxOrderQuantity());
                 SellOrderCreation creation = this.createSellOrderAndEscrow(
-                    player, exchangeItem, entry.item, buyOrder.getPrice(), chunk, false, false);
+                    player, exchangeItem, entry.item, buyOrder.getPrice(), chunk, false);
                 if (creation.order == null) {
                     return supplied > 0
                         ? "\u00a7a\u5df2\u4f9b\u8d27 " + supplied + " \u4e2a\uff0c\u540e\u7eed\u4ea4\u6613\u5931\u8d25\uff1a" + creation.error
