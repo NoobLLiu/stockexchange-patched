@@ -922,6 +922,697 @@ public class OrderManager {
             + " \u5269\u4f59 " + (remaining - withdraw) + " \u4e2a\u3002";
     }
 
+    // ===================== 网页导出接口（WebMarketManager 调用） =====================
+    // 与游戏内操作共用同一撮合/托管/结算引擎；资产来源与退回一律走个人仓库，
+    // 检测（成长等级、数量、价格、停牌、持仓/余额、自成交、托管一致性）与游戏内完全一致。
+
+    public synchronized String webPlaceSell(
+        String uuid, String name, ExchangeItem exchangeItem, BigDecimal price, int quantity
+    ) {
+        if (exchangeItem == null) {
+            return "\u00a7c\u65e0\u6548\u7684\u5546\u54c1\u3002";
+        }
+        if (this.plugin.getItemManager().getSpecialCategory(exchangeItem) != null) {
+            return "\u00a7c\u300c" + exchangeItem.getDisplayName()
+                + "\u300d\u4e3a\u7279\u6b8a\u7c7b\u522b\uff0c\u8bf7\u4f7f\u7528\u201c\u6307\u5b9a\u7269\u54c1\u4e0a\u67b6\u201d\u63a5\u53e3"
+                + "\uff08\u643a\u5e26\u5177\u4f53\u7269\u54c1 base64\uff09\uff0c\u6216\u4f7f\u7528\u5feb\u901f\u4e0a\u67b6/\u4e00\u952e\u4f9b\u8d27\u3002";
+        }
+        ItemStack actualItem = ItemSerializer.itemFromBase64(exchangeItem.getItemBase64());
+        return this.webPlaceSell(uuid, name, exchangeItem, actualItem, price, quantity);
+    }
+
+    public synchronized String webPlaceSell(
+        String uuid, String name, ExchangeItem exchangeItem, ItemStack actualItem, BigDecimal price, int quantity
+    ) {
+        WebSellCreation creation = this.createWebSellOrderAndEscrow(
+            uuid, name, exchangeItem, actualItem, price, quantity
+        );
+        if (creation.order() == null) {
+            return creation.error();
+        }
+        Order order = creation.order();
+        exchangeItem.setLastStockedAt(new Timestamp(System.currentTimeMillis()));
+        exchangeItem.setLastEmptyAt(null);
+        this.plugin.getStorageManager().updateExchangeItem(exchangeItem);
+        this.plugin.getLogger().info("[WebMarket] SELL_CREATE player=" + uuid
+            + " order=" + order.getId() + " item=" + exchangeItem.getId()
+            + " removed=" + quantity + " escrow=" + order.getRemainingQty());
+        this.matchOrder(order);
+        this.refreshLowestSellStatus(exchangeItem.getId());
+        return "\u00a7a\u5356\u5355 #" + order.getId() + " \u5df2\u521b\u5efa\uff01\u5355\u4ef7: "
+            + price + ", \u6570\u91cf: " + quantity;
+    }
+
+    private WebSellCreation createWebSellOrderAndEscrow(
+        String uuid, String name, ExchangeItem exchangeItem, ItemStack actualItem, BigDecimal price, int quantity
+    ) {
+        if (uuid == null || exchangeItem == null) {
+            return new WebSellCreation(null, "\u00a7c\u65e0\u6548\u7684\u73a9\u5bb6\u6216\u5546\u54c1\u3002");
+        }
+        if (this.plugin.isGrowthAccessRestricted(uuid)) {
+            return new WebSellCreation(null, this.plugin.growthAccessMessage(uuid));
+        }
+        if (quantity <= 0 || quantity > this.plugin.getMaxOrderQuantity()) {
+            return new WebSellCreation(null, "\u00a7c\u6570\u91cf\u5fc5\u987b\u5728 1 \u5230 "
+                + this.plugin.getMaxOrderQuantity() + " \u4e4b\u95f4\u3002");
+        }
+        if (!this.isPriceInConfiguredRange(price)) {
+            return new WebSellCreation(null, "\u00a7c\u4ef7\u683c\u5fc5\u987b\u5728 "
+                + this.plugin.getMinPrice() + " \u5230 " + this.plugin.getMaxPrice() + " \u4e4b\u95f4\u3002");
+        }
+        if (!this.isValidPriceTick(price)) {
+            return new WebSellCreation(null, "\u00a7c\u4ef7\u683c\u5fc5\u987b\u662f "
+                + this.plugin.getPriceTick() + " \u7684\u6574\u6570\u500d\u3002");
+        }
+        ItemStatus status = this.plugin.getItemManager().getItemStatus(exchangeItem.getId());
+        if (status != null && status.isSuspended()) {
+            return new WebSellCreation(null, "\u00a7c\u8be5\u54c1\u79cd\u5df2\u505c\u724c\uff0c\u65e0\u6cd5\u6302\u5355\u3002");
+        }
+        ItemStack itemStack = actualItem != null ? actualItem : ItemSerializer.itemFromBase64(exchangeItem.getItemBase64());
+        if (itemStack == null) {
+            return new WebSellCreation(null, "\u00a7c\u7269\u54c1\u53cd\u5e8f\u5217\u5316\u5931\u8d25\u3002");
+        }
+        String itemBase64 = ItemSerializer.itemToBase64(itemStack);
+        if (itemBase64 == null) {
+            return new WebSellCreation(null, "\u00a7c\u7269\u54c1\u5e8f\u5217\u5316\u5931\u8d25\u3002");
+        }
+        if (!this.plugin.getStorageManager().takeFromPlayerItemWarehouse(uuid, itemBase64, quantity)) {
+            return new WebSellCreation(null, "\u00a7c\u4f60\u7684\u4ea4\u6613\u4ed3\u5e93\u4e2d\u6ca1\u6709\u8db3\u591f\u7684\u7269\u54c1\u3002");
+        }
+        Order order = new Order();
+        order.setOrderType(Order.OrderType.SELL);
+        order.setItemId(exchangeItem.getId());
+        order.setPlayerUuid(uuid);
+        order.setPlayerName(name == null ? "\u672a\u77e5\u73a9\u5bb6" : name);
+        order.setPrice(price);
+        order.setQuantity(quantity);
+        order.setFilledQty(0);
+        order.setStatus(Order.OrderStatus.OPEN);
+        order.setCreatedAt(new Timestamp(System.currentTimeMillis()));
+        order.setUpdatedAt(new Timestamp(System.currentTimeMillis()));
+        int orderId = this.plugin.getStorageManager().insertOrder(order);
+        if (orderId <= 0) {
+            this.plugin.getStorageManager().addToPlayerItemWarehouse(uuid, itemBase64, quantity);
+            return new WebSellCreation(null, "\u00a7c\u521b\u5efa\u8ba2\u5355\u5931\u8d25\uff0c\u8bf7\u91cd\u8bd5\u3002");
+        }
+        order.setId(orderId);
+        EscrowEntry escrow = new EscrowEntry();
+        escrow.setOrderId(orderId);
+        escrow.setPlayerUuid(uuid);
+        escrow.setAssetType(EscrowEntry.AssetType.ITEM);
+        escrow.setAmount(BigDecimal.ZERO);
+        escrow.setItemBase64(itemBase64);
+        escrow.setQuantity(quantity);
+        if (!this.plugin.getStorageManager().insertEscrow(escrow)
+            || !this.isValidSellEscrow(order, this.plugin.getStorageManager().getEscrow(orderId, EscrowEntry.AssetType.ITEM))) {
+            order.setStatus(Order.OrderStatus.CANCELLED);
+            this.plugin.getStorageManager().updateOrder(order);
+            this.plugin.getStorageManager().deleteEscrow(orderId, EscrowEntry.AssetType.ITEM);
+            this.plugin.getStorageManager().addToPlayerItemWarehouse(uuid, itemBase64, quantity);
+            this.plugin.getLogger().severe("[WebMarket] SELL_CREATE_ABORT player=" + uuid
+                + " order=" + orderId + " item=" + exchangeItem.getId()
+                + " reason=escrow_verification_failed");
+            return new WebSellCreation(null, "\u00a7c\u6258\u7ba1\u5199\u5165\u5931\u8d25\uff0c\u7269\u54c1\u5df2\u9000\u56de\u4ed3\u5e93\u3002");
+        }
+        return new WebSellCreation(order, null);
+    }
+
+    public synchronized String webPlaceBuy(
+        String uuid, String name, ExchangeItem exchangeItem, BigDecimal price, int quantity
+    ) {
+        if (uuid == null || exchangeItem == null) {
+            return "\u00a7c\u65e0\u6548\u7684\u73a9\u5bb6\u6216\u5546\u54c1\u3002";
+        }
+        if (this.plugin.isGrowthAccessRestricted(uuid)) {
+            return this.plugin.growthAccessMessage(uuid);
+        }
+        if (quantity <= 0 || quantity > this.plugin.getMaxOrderQuantity()) {
+            return "\u00a7c\u6570\u91cf\u5fc5\u987b\u5728 1 \u5230 " + this.plugin.getMaxOrderQuantity() + " \u4e4b\u95f4\u3002";
+        }
+        if (!this.isPriceInConfiguredRange(price)) {
+            return "\u00a7c\u4ef7\u683c\u5fc5\u987b\u5728 " + this.plugin.getMinPrice()
+                + " \u5230 " + this.plugin.getMaxPrice() + " \u4e4b\u95f4\u3002";
+        }
+        if (!this.isValidPriceTick(price)) {
+            return "\u00a7c\u4ef7\u683c\u5fc5\u987b\u662f " + this.plugin.getPriceTick() + " \u7684\u6574\u6570\u500d\u3002";
+        }
+        ItemStatus status = this.plugin.getItemManager().getItemStatus(exchangeItem.getId());
+        if (status != null && status.isSuspended()) {
+            return "\u00a7c\u8be5\u54c1\u79cd\u5df2\u505c\u724c\uff0c\u65e0\u6cd5\u6302\u5355\u3002";
+        }
+        BigDecimal totalCost = price.multiply(BigDecimal.valueOf(quantity));
+        BigDecimal tax = TaxCalculator.tax(totalCost, this.plugin.getTaxRatePercent());
+        BigDecimal chargedTotal = TaxCalculator.withTax(totalCost, this.plugin.getTaxRatePercent());
+        if (this.plugin.getStorageManager().getMoneyWarehouseBalance(uuid).compareTo(chargedTotal) < 0) {
+            return "\u00a7c\u8d27\u5e01\u4ed3\u5e93\u4f59\u989d\u4e0d\u8db3\uff01\u9700\u8981: " + chargedTotal
+                + " \uff08\u542b\u4ea4\u6613\u7a0e " + tax + "\uff09\uff0c\u5f53\u524d: "
+                + this.plugin.getStorageManager().getMoneyWarehouseBalance(uuid);
+        }
+        if (!this.plugin.getStorageManager().takeFromMoneyWarehouse(uuid, chargedTotal)) {
+            return "\u00a7c\u4ed3\u5e93\u6263\u6b3e\u5931\u8d25\uff0c\u8bf7\u91cd\u8bd5\u3002";
+        }
+        Order order = new Order();
+        order.setOrderType(Order.OrderType.BUY);
+        order.setItemId(exchangeItem.getId());
+        order.setPlayerUuid(uuid);
+        order.setPlayerName(name == null ? "\u672a\u77e5\u73a9\u5bb6" : name);
+        order.setPrice(price);
+        order.setQuantity(quantity);
+        order.setFilledQty(0);
+        order.setStatus(Order.OrderStatus.OPEN);
+        order.setCreatedAt(new Timestamp(System.currentTimeMillis()));
+        order.setUpdatedAt(new Timestamp(System.currentTimeMillis()));
+        int orderId = this.plugin.getStorageManager().insertOrder(order);
+        if (orderId <= 0) {
+            this.plugin.getStorageManager().addToMoneyWarehouse(uuid, chargedTotal);
+            return "\u00a7c\u521b\u5efa\u8ba2\u5355\u5931\u8d25\uff0c\u8bf7\u91cd\u8bd5\u3002";
+        }
+        order.setId(orderId);
+        EscrowEntry escrow = new EscrowEntry();
+        escrow.setOrderId(orderId);
+        escrow.setPlayerUuid(uuid);
+        escrow.setAssetType(EscrowEntry.AssetType.MONEY);
+        escrow.setAmount(totalCost);
+        escrow.setItemBase64(null);
+        escrow.setQuantity(0);
+        if (!this.plugin.getStorageManager().insertEscrow(escrow)
+            || !this.isValidMoneyEscrow(order, this.plugin.getStorageManager().getEscrow(orderId, EscrowEntry.AssetType.MONEY), totalCost)) {
+            order.setStatus(Order.OrderStatus.CANCELLED);
+            this.plugin.getStorageManager().updateOrder(order);
+            this.plugin.getStorageManager().deleteEscrow(orderId, EscrowEntry.AssetType.MONEY);
+            this.plugin.getStorageManager().addToMoneyWarehouse(uuid, chargedTotal);
+            return "\u00a7c\u8ba2\u5355\u6258\u7ba1\u5199\u5165\u5931\u8d25\uff0c\u5df2\u9000\u56de\u4ed3\u5e93\u6263\u9664\u7684\u661f\u5149\u70b9\u3002";
+        }
+        this.plugin.collectTax(tax);
+        this.plugin.getLogger().info("[WebMarket] BUY_CREATE player=" + uuid
+            + " order=" + orderId + " item=" + exchangeItem.getId()
+            + " price=" + price + " qty=" + quantity);
+        this.matchOrder(order);
+        this.refreshLowestSellStatus(exchangeItem.getId());
+        return "\u00a7a\u4e70\u5355 #" + orderId + " \u5df2\u521b\u5efa\uff01\u5355\u4ef7: " + price
+            + ", \u6570\u91cf: " + quantity + "\uff0c\u5546\u54c1\u603b\u4ef7: " + totalCost
+            + "\uff0c\u4ea4\u6613\u7a0e: " + tax + "\uff0c\u5b9e\u9645\u6263\u6b3e: " + chargedTotal;
+    }
+
+    public synchronized String webDirectBuy(String uuid, String name, int sellOrderId, int quantity) {
+        if (uuid == null) {
+            return "\u00a7c\u53ea\u6709\u73a9\u5bb6\u53ef\u4ee5\u8d2d\u4e70\u7269\u54c1\u3002";
+        }
+        if (this.plugin.isGrowthAccessRestricted(uuid)) {
+            return this.plugin.growthAccessMessage(uuid);
+        }
+        if (quantity <= 0 || quantity > this.plugin.getMaxOrderQuantity()) {
+            return "\u00a7c\u6570\u91cf\u5fc5\u987b\u5728 1 \u5230 " + this.plugin.getMaxOrderQuantity() + " \u4e4b\u95f4\u3002";
+        }
+        Order sellOrder = this.plugin.getStorageManager().getOrder(sellOrderId);
+        if (sellOrder == null || sellOrder.getOrderType() != Order.OrderType.SELL || !sellOrder.isActive()) {
+            return "\u00a7c\u8be5\u5356\u5355\u5df2\u4e0d\u53ef\u7528\u3002";
+        }
+        if (sellOrder.getPlayerUuid().equals(uuid)) {
+            return "\u00a7c\u4e0d\u80fd\u8d2d\u4e70\u81ea\u5df1\u4e0a\u67b6\u7684\u7269\u54c1\u3002";
+        }
+        if (sellOrder.getRemainingQty() < quantity) {
+            return "\u00a7c\u8be5\u5356\u5355\u5269\u4f59\u6570\u91cf\u4e0d\u8db3\u3002";
+        }
+        ExchangeItem exchangeItem = this.plugin.getItemManager().getItem(sellOrder.getItemId());
+        if (exchangeItem == null) {
+            return "\u00a7c\u8be5\u5546\u54c1\u54c1\u79cd\u4e0d\u5b58\u5728\u3002";
+        }
+        ItemStatus status = this.plugin.getItemManager().getItemStatus(exchangeItem.getId());
+        if (status != null && status.isSuspended()) {
+            return "\u00a7c\u8be5\u54c1\u79cd\u5df2\u505c\u724c\uff0c\u65e0\u6cd5\u8d2d\u4e70\u3002";
+        }
+        BigDecimal totalCost = sellOrder.getPrice().multiply(BigDecimal.valueOf(quantity));
+        BigDecimal tax = TaxCalculator.tax(totalCost, this.plugin.getTaxRatePercent());
+        BigDecimal chargedTotal = TaxCalculator.withTax(totalCost, this.plugin.getTaxRatePercent());
+        if (this.plugin.getStorageManager().getMoneyWarehouseBalance(uuid).compareTo(chargedTotal) < 0) {
+            return "\u00a7c\u8d27\u5e01\u4ed3\u5e93\u4f59\u989d\u4e0d\u8db3\uff01\u9700\u8981: " + chargedTotal
+                + " \uff08\u542b\u4ea4\u6613\u7a0e " + tax + "\uff09\uff0c\u5f53\u524d: "
+                + this.plugin.getStorageManager().getMoneyWarehouseBalance(uuid);
+        }
+        if (!this.plugin.getStorageManager().takeFromMoneyWarehouse(uuid, chargedTotal)) {
+            return "\u00a7c\u4ed3\u5e93\u6263\u6b3e\u5931\u8d25\uff0c\u8bf7\u91cd\u8bd5\u3002";
+        }
+        Order buyOrder = new Order();
+        buyOrder.setOrderType(Order.OrderType.BUY);
+        buyOrder.setItemId(exchangeItem.getId());
+        buyOrder.setPlayerUuid(uuid);
+        buyOrder.setPlayerName(name == null ? "\u672a\u77e5\u73a9\u5bb6" : name);
+        buyOrder.setPrice(sellOrder.getPrice());
+        buyOrder.setQuantity(quantity);
+        buyOrder.setFilledQty(0);
+        buyOrder.setStatus(Order.OrderStatus.OPEN);
+        buyOrder.setCreatedAt(new Timestamp(System.currentTimeMillis()));
+        buyOrder.setUpdatedAt(new Timestamp(System.currentTimeMillis()));
+        int orderId = this.plugin.getStorageManager().insertOrder(buyOrder);
+        if (orderId <= 0) {
+            this.plugin.getStorageManager().addToMoneyWarehouse(uuid, chargedTotal);
+            return "\u00a7c\u521b\u5efa\u8d2d\u4e70\u8ba2\u5355\u5931\u8d25\uff0c\u8bf7\u91cd\u8bd5\u3002";
+        }
+        buyOrder.setId(orderId);
+        EscrowEntry escrow = new EscrowEntry();
+        escrow.setOrderId(orderId);
+        escrow.setPlayerUuid(uuid);
+        escrow.setAssetType(EscrowEntry.AssetType.MONEY);
+        escrow.setAmount(totalCost);
+        escrow.setItemBase64(null);
+        escrow.setQuantity(0);
+        if (!this.plugin.getStorageManager().insertEscrow(escrow)
+            || !this.isValidMoneyEscrow(buyOrder, this.plugin.getStorageManager().getEscrow(orderId, EscrowEntry.AssetType.MONEY), totalCost)) {
+            buyOrder.setStatus(Order.OrderStatus.CANCELLED);
+            this.plugin.getStorageManager().updateOrder(buyOrder);
+            this.plugin.getStorageManager().deleteEscrow(orderId, EscrowEntry.AssetType.MONEY);
+            this.plugin.getStorageManager().addToMoneyWarehouse(uuid, chargedTotal);
+            return "\u00a7c\u8d2d\u4e70\u8ba2\u5355\u6258\u7ba1\u5199\u5165\u5931\u8d25\uff0c\u5df2\u9000\u56de\u4ed3\u5e93\u6263\u9664\u7684\u661f\u5149\u70b9\u3002";
+        }
+        this.plugin.collectTax(tax);
+        if (!this.executeMatch(buyOrder, sellOrder, quantity)) {
+            String cancelResult = this.webCancel(uuid, false, orderId);
+            return "\u00a7c\u4ea4\u6613\u672a\u5b8c\u6210\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u3002 " + cancelResult;
+        }
+        return "\u00a7a\u5df2\u8d2d\u4e70 " + exchangeItem.getDisplayName() + " x" + quantity
+            + "\uff0c\u6210\u4ea4\u4ef7: " + sellOrder.getPrice()
+            + "\uff0c\u4ea4\u6613\u7a0e: " + tax + "\uff0c\u5b9e\u9645\u6263\u6b3e: " + chargedTotal;
+    }
+
+    public synchronized String webDirectSell(String uuid, String name, int buyOrderId, int quantity) {
+        if (uuid == null) {
+            return "\u00a7c\u53ea\u6709\u73a9\u5bb6\u53ef\u4ee5\u51fa\u552e\u7269\u54c1\u3002";
+        }
+        if (this.plugin.isGrowthAccessRestricted(uuid)) {
+            return this.plugin.growthAccessMessage(uuid);
+        }
+        if (quantity <= 0 || quantity > this.plugin.getMaxOrderQuantity()) {
+            return "\u00a7c\u6570\u91cf\u5fc5\u987b\u5728 1 \u5230 " + this.plugin.getMaxOrderQuantity() + " \u4e4b\u95f4\u3002";
+        }
+        Order buyOrder = this.plugin.getStorageManager().getOrder(buyOrderId);
+        if (buyOrder == null || buyOrder.getOrderType() != Order.OrderType.BUY || !buyOrder.isActive()) {
+            return "\u00a7c\u8be5\u6c42\u8d2d\u5355\u5df2\u4e0d\u53ef\u7528\u3002";
+        }
+        if (buyOrder.getPlayerUuid().equals(uuid)) {
+            return "\u00a7c\u4e0d\u80fd\u51fa\u552e\u7ed9\u81ea\u5df1\u7684\u6c42\u8d2d\u5355\u3002";
+        }
+        if (buyOrder.getRemainingQty() < quantity) {
+            return "\u00a7c\u8be5\u6c42\u8d2d\u5355\u5269\u4f59\u6570\u91cf\u4e0d\u8db3\u3002";
+        }
+        ExchangeItem exchangeItem = this.plugin.getItemManager().getItem(buyOrder.getItemId());
+        if (exchangeItem == null) {
+            return "\u00a7c\u8be5\u5546\u54c1\u54c1\u79cd\u4e0d\u5b58\u5728\u3002";
+        }
+        ItemStatus status = this.plugin.getItemManager().getItemStatus(exchangeItem.getId());
+        if (status != null && status.isSuspended()) {
+            return "\u00a7c\u8be5\u54c1\u79cd\u5df2\u505c\u724c\uff0c\u65e0\u6cd5\u4f9b\u8d27\u3002";
+        }
+        SpecialCategory category = this.plugin.getItemManager().getSpecialCategory(exchangeItem);
+        if (category != null) {
+            return this.webSupplyCategoryToBuyOrder(uuid, name, buyOrder, exchangeItem, quantity);
+        }
+        ItemStack itemStack = ItemSerializer.itemFromBase64(exchangeItem.getItemBase64());
+        if (itemStack == null) {
+            return "\u00a7c\u7269\u54c1\u53cd\u5e8f\u5217\u5316\u5931\u8d25\u3002";
+        }
+        WebSellCreation creation = this.createWebSellOrderAndEscrow(
+            uuid, name, exchangeItem, itemStack, buyOrder.getPrice(), quantity
+        );
+        if (creation.order() == null) {
+            return creation.error();
+        }
+        Order sellOrder = creation.order();
+        this.plugin.getLogger().info("[WebMarket] SELL_TO_BUY player=" + uuid
+            + " sellOrder=" + sellOrder.getId() + " buyOrder=" + buyOrderId
+            + " item=" + exchangeItem.getId() + " removed=" + quantity);
+        if (!this.executeMatch(buyOrder, sellOrder, quantity)) {
+            String cancelResult = this.webCancel(uuid, false, sellOrder.getId());
+            return "\u00a7c\u4ea4\u6613\u672a\u5b8c\u6210\uff0c\u7269\u54c1\u672a\u6210\u4ea4\u3002 " + cancelResult;
+        }
+        this.refreshLowestSellStatus(exchangeItem.getId());
+        return "\u00a7a\u5df2\u51fa\u552e " + exchangeItem.getDisplayName() + " x" + quantity
+            + "\uff0c\u6210\u4ea4\u4ef7: " + buyOrder.getPrice();
+    }
+
+    private String webSupplyCategoryToBuyOrder(
+        String uuid, String name, Order buyOrder, ExchangeItem exchangeItem, int quantity
+    ) {
+        SpecialCategory category = this.plugin.getItemManager().getSpecialCategory(exchangeItem);
+        if (uuid == null || buyOrder == null || exchangeItem == null || category == null || quantity <= 0) {
+            return "\u00a7c\u65e0\u6548\u7684\u8ba2\u5355\u6216\u6570\u91cf\u3002";
+        }
+        Map<String, Integer> warehouse = this.plugin.getStorageManager().getPlayerItemWarehouse(uuid);
+        Map<String, Integer> distinct = new LinkedHashMap<String, Integer>();
+        int total = 0;
+        for (Map.Entry<String, Integer> entry : warehouse.entrySet()) {
+            if (entry.getValue() == null || entry.getValue() <= 0) {
+                continue;
+            }
+            ItemStack stack = ItemSerializer.itemFromBase64(entry.getKey());
+            if (stack == null || SpecialCategory.of(stack) != category) {
+                continue;
+            }
+            distinct.put(entry.getKey(), entry.getValue());
+            total += entry.getValue();
+        }
+        if (total < quantity) {
+            return "\u00a7c\u4ed3\u5e93\u4e2d\u7684\u300c" + category.displayName() + "\u300d\u7269\u54c1\u4e0d\u8db3 "
+                + quantity + " \u4e2a\u3002";
+        }
+        int supplied = 0;
+        int remaining = quantity;
+        for (Map.Entry<String, Integer> entry : distinct.entrySet()) {
+            if (remaining <= 0) {
+                break;
+            }
+            int take = Math.min(entry.getValue(), remaining);
+            ItemStack variant = ItemSerializer.itemFromBase64(entry.getKey());
+            if (variant == null) {
+                continue;
+            }
+            int orderRemaining = take;
+            while (orderRemaining > 0) {
+                int chunk = Math.min(orderRemaining, this.plugin.getMaxOrderQuantity());
+                WebSellCreation creation = this.createWebSellOrderAndEscrow(
+                    uuid, name, exchangeItem, variant, buyOrder.getPrice(), chunk
+                );
+                if (creation.order() == null) {
+                    return supplied > 0
+                        ? "\u00a7a\u5df2\u4f9b\u8d27 " + supplied + " \u4e2a\uff0c\u540e\u7eed\u4ea4\u6613\u5931\u8d25\uff1a" + creation.error()
+                        : creation.error();
+                }
+                this.plugin.getLogger().info("[WebMarket] SELL_TO_BUY player=" + uuid
+                    + " sellOrder=" + creation.order().getId() + " buyOrder=" + buyOrder.getId()
+                    + " item=" + exchangeItem.getId() + " removed=" + chunk);
+                if (!this.executeMatch(buyOrder, creation.order(), chunk)) {
+                    String cancelResult = this.webCancel(uuid, false, creation.order().getId());
+                    return supplied > 0
+                        ? "\u00a7a\u5df2\u4f9b\u8d27 " + supplied + " \u4e2a\uff0c\u540e\u7eed\u4ea4\u6613\u672a\u5b8c\u6210\u3002 " + cancelResult
+                        : "\u00a7c\u4ea4\u6613\u672a\u5b8c\u6210\uff0c\u7269\u54c1\u672a\u6210\u4ea4\u3002 " + cancelResult;
+                }
+                supplied += chunk;
+                orderRemaining -= chunk;
+                remaining -= chunk;
+            }
+        }
+        this.refreshLowestSellStatus(exchangeItem.getId());
+        return "\u00a7a\u5df2\u51fa\u552e " + exchangeItem.getDisplayName() + " x" + supplied
+            + "\uff0c\u6210\u4ea4\u4ef7: " + buyOrder.getPrice();
+    }
+
+    public synchronized String webQuickSell(String uuid, String name, ExchangeItem exchangeItem) {
+        if (this.plugin.isGrowthAccessRestricted(uuid)) {
+            return this.plugin.growthAccessMessage(uuid);
+        }
+        BigDecimal lowestPrice = this.getLowestSellPrice(exchangeItem.getId());
+        if (lowestPrice == null || lowestPrice.compareTo(BigDecimal.ZERO) <= 0) {
+            ItemStatus status = this.plugin.getItemManager().getItemStatus(exchangeItem.getId());
+            if (status != null && status.getLastClose() != null && status.getLastClose().compareTo(BigDecimal.ZERO) > 0) {
+                lowestPrice = status.getLastClose();
+            }
+        }
+        if (lowestPrice == null || lowestPrice.compareTo(BigDecimal.ZERO) <= 0) {
+            return "\u00a7c\u5f53\u524d\u65e0\u53c2\u8003\u4ef7\u683c\uff0c\u8bf7\u4f7f\u7528\u666e\u901a\u4e0a\u67b6\u624b\u52a8\u8f93\u5165\u4ef7\u683c\u3002";
+        }
+        SpecialCategory category = this.plugin.getItemManager().getSpecialCategory(exchangeItem);
+        if (category != null) {
+            Map<String, Integer> entries = this.webWarehouseCategoryEntries(uuid, category);
+            if (entries.isEmpty()) {
+                return "\u00a7c\u4ed3\u5e93\u4e2d\u6ca1\u6709\u53ef\u4e0a\u67b6\u7684\u300c" + category.displayName()
+                    + "\u300d\u7269\u54c1\uff0c\u6216\u5305\u542b\u591a\u79cd\u540c\u7c7b\u7269\u54c1\uff0c\u8bf7\u4f7f\u7528\u4e0a\u67b6\u83dc\u5355\u3002";
+            }
+            if (entries.size() > 1) {
+                return "\u00a7c\u4ed3\u5e93\u4e2d\u5305\u542b\u591a\u79cd\u540c\u7c7b\u7269\u54c1\uff0c\u8bf7\u4f7f\u7528\u4e0a\u67b6\u83dc\u5355\u9009\u62e9\u5177\u4f53\u7269\u54c1\u3002";
+            }
+            Map.Entry<String, Integer> entry = entries.entrySet().iterator().next();
+            ItemStack actualItem = ItemSerializer.itemFromBase64(entry.getKey());
+            if (actualItem == null) {
+                return "\u00a7c\u7269\u54c1\u53cd\u5e8f\u5217\u5316\u5931\u8d25\u3002";
+            }
+            int quantity = Math.min(entry.getValue(), this.plugin.getMaxOrderQuantity());
+            return this.webPlaceSell(uuid, name, exchangeItem, actualItem, lowestPrice, quantity);
+        }
+        int totalCount = this.webWarehouseQuantity(uuid, exchangeItem.getItemBase64());
+        if (totalCount <= 0) {
+            return "\u00a7c\u4ed3\u5e93\u4e2d\u6ca1\u6709\u8be5\u7c7b\u578b\u7269\u54c1\u3002";
+        }
+        int quantity = Math.min(totalCount, this.plugin.getMaxOrderQuantity());
+        return this.webPlaceSell(uuid, name, exchangeItem, lowestPrice, quantity);
+    }
+
+    public synchronized SupplyPlanner.Plan webSupplyPlan(String uuid, ExchangeItem exchangeItem) {
+        if (uuid == null || exchangeItem == null) {
+            return SupplyPlanner.plan(0, null);
+        }
+        if (this.plugin.isGrowthAccessRestricted(uuid)) {
+            return SupplyPlanner.plan(0, null);
+        }
+        ItemStatus status = this.plugin.getItemManager().getItemStatus(exchangeItem.getId());
+        if (status != null && status.isSuspended()) {
+            return SupplyPlanner.plan(0, null);
+        }
+        ItemStack itemStack = ItemSerializer.itemFromBase64(exchangeItem.getItemBase64());
+        if (itemStack == null) {
+            return SupplyPlanner.plan(0, null);
+        }
+        List<Order> buyOrders = new ArrayList<Order>(
+            this.getActiveOrders(exchangeItem.getId(), Order.OrderType.BUY)
+        );
+        buyOrders.removeIf(order -> uuid.equals(order.getPlayerUuid()));
+        SpecialCategory category = this.plugin.getItemManager().getSpecialCategory(exchangeItem);
+        int available;
+        if (category != null) {
+            int total = 0;
+            for (Integer count : this.webWarehouseCategoryEntries(uuid, category).values()) {
+                total += count;
+            }
+            available = total;
+        } else {
+            available = this.webWarehouseQuantity(uuid, exchangeItem.getItemBase64());
+        }
+        return SupplyPlanner.plan(available, buyOrders);
+    }
+
+    public synchronized String webSupplyAll(String uuid, String name, ExchangeItem exchangeItem) {
+        if (uuid == null || exchangeItem == null) {
+            return "\u00a7c\u65e0\u6548\u7684\u73a9\u5bb6\u6216\u5546\u54c1\u3002";
+        }
+        if (this.plugin.isGrowthAccessRestricted(uuid)) {
+            return this.plugin.growthAccessMessage(uuid);
+        }
+        SupplyPlanner.Plan plan = this.webSupplyPlan(uuid, exchangeItem);
+        if (plan.matchedQuantity() <= 0) {
+            if (plan.availableQuantity() > 0) {
+                return "\u00a7c\u5f53\u524d\u6ca1\u6709\u5176\u4ed6\u73a9\u5bb6\u7684\u53ef\u4f9b\u8d27\u6c42\u8d2d\u5355\uff08\u4e0d\u80fd\u4f9b\u8d27\u7ed9\u81ea\u5df1\u7684\u6c42\u8d2d\u5355\uff09\u3002";
+            }
+            return "\u00a7c\u5f53\u524d\u6ca1\u6709\u53ef\u4f9b\u8d27\u7684\u6c42\u8d2d\u5355\uff0c\u6216\u4ed3\u5e93\u4e2d\u6ca1\u6709\u53ef\u7528\u7269\u54c1\u3002";
+        }
+        int supplied = 0;
+        BigDecimal grossAmount = BigDecimal.ZERO;
+        BigDecimal tax = BigDecimal.ZERO;
+        for (SupplyPlanner.Allocation allocation : plan.allocations()) {
+            int remaining = allocation.quantity();
+            boolean allocationFailed = false;
+            while (remaining > 0) {
+                int chunk = Math.min(remaining, this.plugin.getMaxOrderQuantity());
+                String result = this.webDirectSell(uuid, name, allocation.order().getId(), chunk);
+                if (result == null || result.startsWith("\u00a7c")) {
+                    allocationFailed = true;
+                    break;
+                }
+                supplied += chunk;
+                BigDecimal amount = allocation.order().getPrice().multiply(BigDecimal.valueOf(chunk));
+                grossAmount = grossAmount.add(amount);
+                tax = tax.add(TaxCalculator.tax(amount, this.plugin.getTaxRatePercent()));
+                remaining -= chunk;
+            }
+            if (allocationFailed) {
+                break;
+            }
+        }
+        if (supplied <= 0) {
+            return "\u00a7c\u4e00\u952e\u4f9b\u8d27\u5931\u8d25\uff0c\u8bf7\u68c0\u67e5\u4ed3\u5e93\u548c\u6c42\u8d2d\u5355\u3002";
+        }
+        BigDecimal received = grossAmount.subtract(tax);
+        String completion = supplied == plan.matchedQuantity() ? "\u5b8c\u6210" : "\u90e8\u5206\u5b8c\u6210";
+        return "\u00a7a\u4e00\u952e\u4f9b\u8d27" + completion + "\uff1a" + supplied + " \u4e2a"
+            + "\uff0c\u9884\u8ba1\u6210\u4ea4\u989d: " + grossAmount.toPlainString()
+            + "\uff0c\u9884\u8ba1\u5230\u8d26: " + received.toPlainString()
+            + " \uff08\u4ea4\u6613\u7a0e " + tax.toPlainString() + "\uff09";
+    }
+
+    public synchronized String webCancel(String uuid, boolean admin, int orderId) {
+        if (uuid == null) {
+            return "\u00a7c\u53ea\u6709\u73a9\u5bb6\u53ef\u4ee5\u53d6\u6d88\u8ba2\u5355\u3002";
+        }
+        if (this.plugin.isGrowthAccessRestricted(uuid)) {
+            return this.plugin.growthAccessMessage(uuid);
+        }
+        Order order = this.plugin.getStorageManager().getOrder(orderId);
+        if (order == null) {
+            return "\u00a7c\u8ba2\u5355\u4e0d\u5b58\u5728\u3002";
+        }
+        if (!order.getPlayerUuid().equals(uuid) && !admin) {
+            return "\u00a7c\u8fd9\u4e0d\u662f\u4f60\u7684\u8ba2\u5355\u3002";
+        }
+        if (!order.isActive()) {
+            return "\u00a7c\u8ba2\u5355\u5df2\u7ed3\u675f\uff0c\u65e0\u6cd5\u53d6\u6d88\u3002";
+        }
+        String owner = order.getPlayerUuid();
+        if (order.getOrderType() == Order.OrderType.SELL) {
+            EscrowEntry escrow = this.plugin.getStorageManager().getEscrow(order.getId(), EscrowEntry.AssetType.ITEM);
+            if (!this.isValidSellEscrow(order, escrow)) {
+                this.plugin.getLogger().severe("[WebMarket] SELL_CANCEL_BLOCKED player=" + uuid
+                    + " order=" + orderId + " remaining=" + order.getRemainingQty()
+                    + " escrow=" + (escrow == null ? "missing" : escrow.getQuantity()));
+                return "\u00a7c\u8be5\u5356\u5355\u7684\u6258\u7ba1\u6570\u636e\u5f02\u5e38\uff0c\u5df2\u963b\u6b62\u9000\u6b3e\u5e76\u8bb0\u5f55\u65e5\u5fd7\uff0c\u8bf7\u8054\u7cfb\u7ba1\u7406\u5458\u3002";
+            }
+            Order cancelledOrder = this.copyOrder(order);
+            cancelledOrder.setStatus(Order.OrderStatus.CANCELLED);
+            if (!this.plugin.getStorageManager().updateOrder(cancelledOrder)) {
+                return "\u00a7c\u8ba2\u5355\u72b6\u6001\u4fdd\u5b58\u5931\u8d25\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u3002";
+            }
+            if (!this.plugin.getStorageManager().addToPlayerItemWarehouse(
+                owner, escrow.getItemBase64(), order.getRemainingQty())) {
+                this.plugin.getStorageManager().updateOrder(order);
+                return "\u00a7c\u8d44\u4ea7\u9000\u56de\u5931\u8d25\uff0c\u8ba2\u5355\u5df2\u6062\u590d\u4e3a\u6d3b\u8dc3\u72b6\u6001\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u3002";
+            }
+            this.plugin.getStorageManager().deleteEscrow(order.getId(), EscrowEntry.AssetType.ITEM);
+            this.plugin.getLogger().info("[WebMarket] SELL_CANCEL player=" + uuid
+                + " order=" + orderId + " item=" + order.getItemId()
+                + " refund=" + order.getRemainingQty());
+            this.refreshLowestSellStatus(order.getItemId());
+        } else {
+            EscrowEntry escrow = this.plugin.getStorageManager().getEscrow(order.getId(), EscrowEntry.AssetType.MONEY);
+            BigDecimal required = order.getPrice().multiply(BigDecimal.valueOf(order.getRemainingQty()));
+            if (!this.isValidMoneyEscrow(order, escrow, required)) {
+                this.plugin.getLogger().severe("[WebMarket] BUY_CANCEL_BLOCKED player=" + uuid
+                    + " order=" + orderId + " remaining=" + order.getRemainingQty()
+                    + " escrow=" + (escrow == null ? "missing" : escrow.getAmount()));
+                return "\u00a7c\u8be5\u6c42\u8d2d\u5355\u7684\u6258\u7ba1\u6570\u636e\u5f02\u5e38\uff0c\u5df2\u963b\u6b62\u9000\u6b3e\u5e76\u8bb0\u5f55\u65e5\u5fd7\uff0c\u8bf7\u8054\u7cfb\u7ba1\u7406\u5458\u3002";
+            }
+            Order cancelledOrder = this.copyOrder(order);
+            cancelledOrder.setStatus(Order.OrderStatus.CANCELLED);
+            if (!this.plugin.getStorageManager().updateOrder(cancelledOrder)) {
+                return "\u00a7c\u8ba2\u5355\u72b6\u6001\u4fdd\u5b58\u5931\u8d25\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u3002";
+            }
+            BigDecimal refund = escrow == null ? required : escrow.getAmount();
+            if (!this.plugin.getStorageManager().addToMoneyWarehouse(owner, refund)) {
+                this.plugin.getStorageManager().updateOrder(order);
+                return "\u00a7c\u8d44\u4ea7\u9000\u56de\u5931\u8d25\uff0c\u8ba2\u5355\u5df2\u6062\u590d\u4e3a\u6d3b\u8dc3\u72b6\u6001\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u3002";
+            }
+            this.plugin.getStorageManager().deleteEscrow(order.getId(), EscrowEntry.AssetType.MONEY);
+            this.plugin.getLogger().info("[WebMarket] BUY_CANCEL player=" + uuid
+                + " order=" + orderId + " refund=" + refund);
+        }
+        return "\u00a7a\u8ba2\u5355 #" + orderId + " \u5df2\u53d6\u6d88\uff0c\u8d44\u4ea7\u5df2\u9000\u56de\u4ed3\u5e93\u3002";
+    }
+
+    public synchronized String webWithdrawQuantity(String uuid, boolean admin, int orderId, int quantity) {
+        if (uuid == null) {
+            return "\u00a7c\u53ea\u6709\u73a9\u5bb6\u53ef\u4ee5\u53d6\u56de\u6302\u5355\u3002";
+        }
+        if (quantity <= 0) {
+            return "\u00a7c\u53d6\u56de\u6570\u91cf\u5fc5\u987b\u5927\u4e8e 0\u3002";
+        }
+        if (this.plugin.isGrowthAccessRestricted(uuid)) {
+            return this.plugin.growthAccessMessage(uuid);
+        }
+        Order order = this.plugin.getStorageManager().getOrder(orderId);
+        if (order == null) {
+            return "\u00a7c\u8ba2\u5355\u4e0d\u5b58\u5728\u3002";
+        }
+        if (!order.getPlayerUuid().equals(uuid) && !admin) {
+            return "\u00a7c\u8fd9\u4e0d\u662f\u4f60\u7684\u8ba2\u5355\u3002";
+        }
+        if (!order.isActive()) {
+            return "\u00a7c\u8ba2\u5355\u5df2\u7ed3\u675f\uff0c\u65e0\u6cd5\u53d6\u56de\u3002";
+        }
+        int remaining = order.getRemainingQty();
+        if (remaining <= 0) {
+            return "\u00a7c\u8ba2\u5355\u6ca1\u6709\u53ef\u53d6\u56de\u7684\u8d44\u4ea7\u3002";
+        }
+        int withdraw = Math.min(quantity, remaining);
+        if (withdraw >= remaining) {
+            return this.webCancel(uuid, admin, orderId);
+        }
+        String owner = order.getPlayerUuid();
+        if (order.getOrderType() == Order.OrderType.SELL) {
+            EscrowEntry escrow = this.plugin.getStorageManager().getEscrow(order.getId(), EscrowEntry.AssetType.ITEM);
+            if (!this.isValidSellEscrow(order, escrow)) {
+                this.plugin.getLogger().severe("[WebMarket] SELL_PARTIAL_WITHDRAW_BLOCKED player=" + uuid
+                    + " order=" + orderId + " remaining=" + remaining
+                    + " escrow=" + (escrow == null ? "missing" : escrow.getQuantity()));
+                return "\u00a7c\u8be5\u5356\u5355\u7684\u6258\u7ba1\u6570\u636e\u5f02\u5e38\uff0c\u5df2\u963b\u6b62\u9000\u6b3e\u5e76\u8bb0\u5f55\u65e5\u5fd7\uff0c\u8bf7\u8054\u7cfb\u7ba1\u7406\u5458\u3002";
+            }
+            Order next = this.copyOrder(order);
+            next.setQuantity(remaining - withdraw);
+            if (!this.plugin.getStorageManager().updateOrder(next)) {
+                return "\u00a7c\u8ba2\u5355\u72b6\u6001\u4fdd\u5b58\u5931\u8d25\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u3002";
+            }
+            EscrowEntry nextEscrow = this.copyEscrow(escrow);
+            nextEscrow.setQuantity(escrow.getQuantity() - withdraw);
+            if (!this.plugin.getStorageManager().insertEscrow(nextEscrow)
+                || !this.plugin.getStorageManager().addToPlayerItemWarehouse(owner, escrow.getItemBase64(), withdraw)) {
+                this.plugin.getStorageManager().updateOrder(order);
+                this.restoreEscrowState(escrow);
+                return "\u00a7c\u53d6\u56de\u5931\u8d25\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u3002";
+            }
+            this.plugin.getLogger().info("[WebMarket] SELL_PARTIAL_WITHDRAW player=" + uuid
+                + " order=" + orderId + " item=" + order.getItemId() + " refund=" + withdraw);
+            return "\u00a7a\u5df2\u53d6\u56de " + withdraw + " \u4e2a\u7269\u54c1\uff0c\u5356\u5355 #" + orderId
+                + " \u5269\u4f59 " + (remaining - withdraw) + " \u4e2a\u3002";
+        }
+        BigDecimal refund = order.getPrice().multiply(BigDecimal.valueOf(withdraw));
+        BigDecimal required = order.getPrice().multiply(BigDecimal.valueOf(remaining));
+        EscrowEntry escrow = this.plugin.getStorageManager().getEscrow(order.getId(), EscrowEntry.AssetType.MONEY);
+        if (!this.isValidMoneyEscrow(order, escrow, required)) {
+            this.plugin.getLogger().severe("[WebMarket] BUY_PARTIAL_WITHDRAW_BLOCKED player=" + uuid
+                + " order=" + orderId + " remaining=" + remaining
+                + " escrow=" + (escrow == null ? "missing" : escrow.getAmount()));
+            return "\u00a7c\u8be5\u6c42\u8d2d\u5355\u7684\u6258\u7ba1\u6570\u636e\u5f02\u5e38\uff0c\u5df2\u963b\u6b62\u9000\u6b3e\u5e76\u8bb0\u5f55\u65e5\u5fd7\uff0c\u8bf7\u8054\u7cfb\u7ba1\u7406\u5458\u3002";
+        }
+        Order next = this.copyOrder(order);
+        next.setQuantity(remaining - withdraw);
+        if (!this.plugin.getStorageManager().updateOrder(next)) {
+            return "\u00a7c\u8ba2\u5355\u72b6\u6001\u4fdd\u5b58\u5931\u8d25\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u3002";
+        }
+        EscrowEntry nextEscrow = this.copyEscrow(escrow);
+        nextEscrow.setAmount(escrow.getAmount().subtract(refund));
+        if (!this.plugin.getStorageManager().insertEscrow(nextEscrow)
+            || !this.plugin.getStorageManager().addToMoneyWarehouse(owner, refund)) {
+            this.plugin.getStorageManager().updateOrder(order);
+            this.restoreEscrowState(escrow);
+            return "\u00a7c\u53d6\u56de\u5931\u8d25\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u3002";
+        }
+        this.plugin.getLogger().info("[WebMarket] BUY_PARTIAL_WITHDRAW player=" + uuid
+            + " order=" + orderId + " item=" + order.getItemId() + " refund=" + refund.toPlainString());
+        return "\u00a7a\u5df2\u51cf\u5c11 " + withdraw + " \u4e2a\u6c42\u8d2d\uff0c\u9000\u56de " + refund.toPlainString()
+            + " " + this.plugin.getCurrencyName() + "\uff0c\u6c42\u8d2d\u5355 #" + orderId
+            + " \u5269\u4f59 " + (remaining - withdraw) + " \u4e2a\u3002";
+    }
+
+    private int webWarehouseQuantity(String uuid, String itemBase64) {
+        if (uuid == null || itemBase64 == null) {
+            return 0;
+        }
+        Integer qty = this.plugin.getStorageManager().getPlayerItemWarehouse(uuid).get(itemBase64);
+        return qty == null ? 0 : qty;
+    }
+
+    private Map<String, Integer> webWarehouseCategoryEntries(String uuid, SpecialCategory category) {
+        Map<String, Integer> result = new LinkedHashMap<String, Integer>();
+        if (uuid == null || category == null) {
+            return result;
+        }
+        for (Map.Entry<String, Integer> entry : this.plugin.getStorageManager().getPlayerItemWarehouse(uuid).entrySet()) {
+            if (entry.getValue() == null || entry.getValue() <= 0) {
+                continue;
+            }
+            ItemStack stack = ItemSerializer.itemFromBase64(entry.getKey());
+            if (stack != null && SpecialCategory.of(stack) == category) {
+                result.put(entry.getKey(), entry.getValue());
+            }
+        }
+        return result;
+    }
+
     private void matchOrder(Order newOrder) {
         if (newOrder == null || !newOrder.isActive()) {
             return;
@@ -1709,6 +2400,24 @@ public class OrderManager {
         private CategoryItem(ItemStack item, int count) {
             this.item = item;
             this.count = count;
+        }
+    }
+
+    private static final class WebSellCreation {
+        private final Order order;
+        private final String error;
+
+        private WebSellCreation(Order order, String error) {
+            this.order = order;
+            this.error = error;
+        }
+
+        private Order order() {
+            return this.order;
+        }
+
+        private String error() {
+            return this.error;
         }
     }
 }

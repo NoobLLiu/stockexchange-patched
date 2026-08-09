@@ -35,8 +35,10 @@ import com.github.exchange.util.EconomyUtil;
 import com.github.exchange.util.ItemDatabase;
 import com.github.exchange.util.ItemSerializer;
 import com.github.exchange.util.TaxCalculator;
+import com.github.exchange.web.WebMarketManager;
 import java.math.BigDecimal;
 import java.io.File;
+import java.util.UUID;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.ArrayList;
@@ -93,6 +95,7 @@ extends JavaPlugin {
     private BukkitTask marketCleanupTask;
     private final List<String> announcements = new ArrayList<String>();
     private MailService mailService;
+    private WebMarketManager webMarketManager;
 
 
     public void onEnable() {
@@ -130,6 +133,7 @@ extends JavaPlugin {
         this.sellBuyerTracker.load();
         this.chatInputHandler = new ChatInputHandler(this);
         this.itemDatabase = new ItemDatabase(this.getLogger());
+        this.webMarketManager = new WebMarketManager(this);
         ExchangeCommand exchangeCmd = new ExchangeCommand(this);
         PluginCommand seCommand = this.getCommand("se");
         if (seCommand != null) {
@@ -371,6 +375,10 @@ extends JavaPlugin {
         return this.itemDatabase;
     }
 
+    public WebMarketManager getWebMarketManager() {
+        return this.webMarketManager;
+    }
+
     public double getPriceTick() {
         return this.priceTick;
     }
@@ -474,6 +482,16 @@ extends JavaPlugin {
         return GrowthLevelAccess.restricted(player);
     }
 
+    public boolean isGrowthAccessRestricted(String playerUuid) {
+        try {
+            return GrowthLevelAccess.restricted(
+                playerUuid == null ? null : UUID.fromString(playerUuid)
+            );
+        } catch (IllegalArgumentException ex) {
+            return true;
+        }
+    }
+
     public boolean denyGrowthAccess(Player player) {
         if (!this.isGrowthAccessRestricted(player)) {
             return false;
@@ -487,6 +505,21 @@ extends JavaPlugin {
             + GrowthLevelAccess.REQUIRED_LEVEL
             + "\u00a7c \u7ea7\u540e\u624d\u80fd\u4f7f\u7528\u3002\u5f53\u524d\u7b49\u7ea7\uff1a\u00a7f"
             + GrowthLevelAccess.level(player);
+    }
+
+    public String growthAccessMessage(String playerUuid) {
+        int level = 0;
+        try {
+            level = GrowthLevelAccess.level(
+                playerUuid == null ? null : UUID.fromString(playerUuid)
+            );
+        } catch (IllegalArgumentException ignored) {
+            level = 0;
+        }
+        return "\u00a7c\u4ea4\u6613\u5e02\u573a\u529f\u80fd\u9700\u8981\u6210\u957f\u7b49\u7ea7\u8fbe\u5230 \u00a7e"
+            + GrowthLevelAccess.REQUIRED_LEVEL
+            + "\u00a7c \u7ea7\u540e\u624d\u80fd\u4f7f\u7528\u3002\u5f53\u524d\u7b49\u7ea7\uff1a\u00a7f"
+            + level;
     }
 
     public boolean isBedrockPlayer(Player player) {
