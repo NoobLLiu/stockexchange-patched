@@ -877,7 +877,7 @@ public class OrderManager {
                 return "\u00a7c\u8be5\u5356\u5355\u7684\u6258\u7ba1\u6570\u636e\u5f02\u5e38\uff0c\u5df2\u963b\u6b62\u9000\u6b3e\u5e76\u8bb0\u5f55\u65e5\u5fd7\uff0c\u8bf7\u8054\u7cfb\u7ba1\u7406\u5458\u3002";
             }
             Order next = this.copyOrder(order);
-            next.setQuantity(remaining - withdraw);
+            next.setQuantity(order.getQuantity() - withdraw);
             if (!this.plugin.getStorageManager().updateOrder(next)) {
                 return "\u00a7c\u8ba2\u5355\u72b6\u6001\u4fdd\u5b58\u5931\u8d25\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u3002";
             }
@@ -904,7 +904,7 @@ public class OrderManager {
             return "\u00a7c\u8be5\u6c42\u8d2d\u5355\u7684\u6258\u7ba1\u6570\u636e\u5f02\u5e38\uff0c\u5df2\u963b\u6b62\u9000\u6b3e\u5e76\u8bb0\u5f55\u65e5\u5fd7\uff0c\u8bf7\u8054\u7cfb\u7ba1\u7406\u5458\u3002";
         }
         Order next = this.copyOrder(order);
-        next.setQuantity(remaining - withdraw);
+        next.setQuantity(order.getQuantity() - withdraw);
         if (!this.plugin.getStorageManager().updateOrder(next)) {
             return "\u00a7c\u8ba2\u5355\u72b6\u6001\u4fdd\u5b58\u5931\u8d25\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u3002";
         }
@@ -1543,7 +1543,7 @@ public class OrderManager {
                 return "\u00a7c\u8be5\u5356\u5355\u7684\u6258\u7ba1\u6570\u636e\u5f02\u5e38\uff0c\u5df2\u963b\u6b62\u9000\u6b3e\u5e76\u8bb0\u5f55\u65e5\u5fd7\uff0c\u8bf7\u8054\u7cfb\u7ba1\u7406\u5458\u3002";
             }
             Order next = this.copyOrder(order);
-            next.setQuantity(remaining - withdraw);
+            next.setQuantity(order.getQuantity() - withdraw);
             if (!this.plugin.getStorageManager().updateOrder(next)) {
                 return "\u00a7c\u8ba2\u5355\u72b6\u6001\u4fdd\u5b58\u5931\u8d25\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u3002";
             }
@@ -1570,7 +1570,7 @@ public class OrderManager {
             return "\u00a7c\u8be5\u6c42\u8d2d\u5355\u7684\u6258\u7ba1\u6570\u636e\u5f02\u5e38\uff0c\u5df2\u963b\u6b62\u9000\u6b3e\u5e76\u8bb0\u5f55\u65e5\u5fd7\uff0c\u8bf7\u8054\u7cfb\u7ba1\u7406\u5458\u3002";
         }
         Order next = this.copyOrder(order);
-        next.setQuantity(remaining - withdraw);
+        next.setQuantity(order.getQuantity() - withdraw);
         if (!this.plugin.getStorageManager().updateOrder(next)) {
             return "\u00a7c\u8ba2\u5355\u72b6\u6001\u4fdd\u5b58\u5931\u8d25\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u3002";
         }
