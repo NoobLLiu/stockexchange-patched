@@ -778,7 +778,7 @@ implements Listener {
             while (left > 0) {
                 int chunk = Math.min(left, plugin.getMaxOrderQuantity());
                 String result = plugin.getOrderManager().placeSellOrderFromReserved(
-                    player, categoryItem, actual, price, chunk
+                    player, categoryItem, entry.getKey(), price, chunk
                 );
                 if (result.startsWith("\u00a7c")) {
                     player.sendMessage(result);

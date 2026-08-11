@@ -56,19 +56,26 @@ public class OrderManager {
         } else {
             actualItem = ItemSerializer.itemFromBase64(exchangeItem.getItemBase64());
         }
-        return this.placeSellOrderInternal(player, exchangeItem, actualItem, price, quantity, false);
+        return this.placeSellOrderInternal(player, exchangeItem, actualItem, null, price, quantity, false);
     }
 
     public synchronized String placeSellOrder(Player player, ExchangeItem exchangeItem, ItemStack actualItem, BigDecimal price, int quantity) {
-        return this.placeSellOrderInternal(player, exchangeItem, actualItem, price, quantity, false);
+        return this.placeSellOrderInternal(player, exchangeItem, actualItem, null, price, quantity, false);
     }
 
-    public synchronized String placeSellOrderFromReserved(Player player, ExchangeItem exchangeItem, ItemStack actualItem, BigDecimal price, int quantity) {
-        return this.placeSellOrderInternal(player, exchangeItem, actualItem, price, quantity, true);
+    public synchronized String placeSellOrderFromReserved(Player player, ExchangeItem exchangeItem, String itemBase64, BigDecimal price, int quantity) {
+        if (itemBase64 == null || itemBase64.isBlank()) {
+            return "\u00a7c\u7269\u54c1\u5e8f\u5217\u5316\u5931\u8d25\u3002";
+        }
+        ItemStack actualItem = ItemSerializer.itemFromBase64(itemBase64);
+        if (actualItem == null) {
+            return "\u00a7c\u7269\u54c1\u6570\u636e\u635f\u574f\uff0c\u65e0\u6cd5\u4e0a\u67b6\u3002";
+        }
+        return this.placeSellOrderInternal(player, exchangeItem, actualItem, itemBase64, price, quantity, true);
     }
 
-    private synchronized String placeSellOrderInternal(Player player, ExchangeItem exchangeItem, ItemStack actualItem, BigDecimal price, int quantity, boolean fromReserved) {
-        SellOrderCreation creation = this.createSellOrderAndEscrow(player, exchangeItem, actualItem, price, quantity, fromReserved);
+    private synchronized String placeSellOrderInternal(Player player, ExchangeItem exchangeItem, ItemStack actualItem, String reservedBase64, BigDecimal price, int quantity, boolean fromReserved) {
+        SellOrderCreation creation = this.createSellOrderAndEscrow(player, exchangeItem, actualItem, reservedBase64, price, quantity, fromReserved);
         if (creation.order == null) {
             return creation.error;
         }
@@ -85,6 +92,10 @@ public class OrderManager {
     }
 
     private SellOrderCreation createSellOrderAndEscrow(Player player, ExchangeItem exchangeItem, ItemStack actualItem, BigDecimal price, int quantity, boolean fromReserved) {
+        return this.createSellOrderAndEscrow(player, exchangeItem, actualItem, null, price, quantity, fromReserved);
+    }
+
+    private SellOrderCreation createSellOrderAndEscrow(Player player, ExchangeItem exchangeItem, ItemStack actualItem, String reservedBase64, BigDecimal price, int quantity, boolean fromReserved) {
         if (player == null || exchangeItem == null) {
             return new SellOrderCreation(null, "\u00a7c\u65e0\u6548\u7684\u73a9\u5bb6\u6216\u5546\u54c1\u3002", null);
         }
@@ -109,7 +120,9 @@ public class OrderManager {
         if (itemStack == null) {
             return new SellOrderCreation(null, "\u00a7c\u7269\u54c1\u53cd\u5e8f\u5217\u5316\u5931\u8d25\u3002", null);
         }
-        String itemBase64 = ItemSerializer.itemToBase64(itemStack);
+        String itemBase64 = reservedBase64 != null && !reservedBase64.isBlank()
+            ? reservedBase64
+            : ItemSerializer.itemToBase64(itemStack);
         if (itemBase64 == null) {
             return new SellOrderCreation(null, "\u00a7c\u7269\u54c1\u5e8f\u5217\u5316\u5931\u8d25\u3002", null);
         }
