@@ -88,6 +88,7 @@ public class OrderManager {
             + " escrow=" + order.getRemainingQty());
         this.matchOrder(order);
         this.refreshLowestSellStatus(exchangeItem.getId());
+        this.broadcastNewListing(exchangeItem);
         return "\u00a7a\u5356\u5355 #" + order.getId() + " \u5df2\u521b\u5efa\uff01\u5355\u4ef7: " + price + ", \u6570\u91cf: " + quantity;
     }
 
@@ -265,6 +266,7 @@ public class OrderManager {
         this.plugin.collectTax(tax);
         this.matchOrder(order);
         this.refreshLowestSellStatus(exchangeItem.getId());
+        this.broadcastNewBuyRequest(exchangeItem, price);
         return "\u00a7a\u4e70\u5355 #" + orderId + " \u5df2\u521b\u5efa\uff01\u5355\u4ef7: " + price
             + ", \u6570\u91cf: " + quantity + "\uff0c\u5546\u54c1\u603b\u4ef7: " + totalCost
             + "\uff0c\u4ea4\u6613\u7a0e: " + tax + "\uff0c\u5b9e\u9645\u6263\u6b3e: " + chargedTotal;
@@ -973,6 +975,7 @@ public class OrderManager {
             + " removed=" + quantity + " escrow=" + order.getRemainingQty());
         this.matchOrder(order);
         this.refreshLowestSellStatus(exchangeItem.getId());
+        this.broadcastNewListing(exchangeItem);
         return "\u00a7a\u5356\u5355 #" + order.getId() + " \u5df2\u521b\u5efa\uff01\u5355\u4ef7: "
             + price + ", \u6570\u91cf: " + quantity;
     }
@@ -1123,6 +1126,7 @@ public class OrderManager {
             + " price=" + price + " qty=" + quantity);
         this.matchOrder(order);
         this.refreshLowestSellStatus(exchangeItem.getId());
+        this.broadcastNewBuyRequest(exchangeItem, price);
         return "\u00a7a\u4e70\u5355 #" + orderId + " \u5df2\u521b\u5efa\uff01\u5355\u4ef7: " + price
             + ", \u6570\u91cf: " + quantity + "\uff0c\u5546\u54c1\u603b\u4ef7: " + totalCost
             + "\uff0c\u4ea4\u6613\u7a0e: " + tax + "\uff0c\u5b9e\u9645\u6263\u6b3e: " + chargedTotal;
@@ -2096,6 +2100,27 @@ public class OrderManager {
         status.setLowestSellReference30d(reference30d);
         status.setLowestSellReferenceAt30d(referenceAt30d);
         this.plugin.getItemManager().updateItemStatus(status);
+    }
+
+    private void broadcastNewListing(ExchangeItem exchangeItem) {
+        if (exchangeItem == null) {
+            return;
+        }
+        String name = exchangeItem.getDisplayName() != null && !exchangeItem.getDisplayName().isBlank()
+            ? exchangeItem.getDisplayName() : "#" + exchangeItem.getId();
+        this.plugin.getServer().broadcastMessage(
+            "\u00a76\u65b0\u7684\u5546\u54c1\uff1a\u00a7f" + name + "\u00a76\u6b63\u5728\u5e02\u573a\u70ed\u5356\u4e2d\uff01");
+    }
+
+    private void broadcastNewBuyRequest(ExchangeItem exchangeItem, BigDecimal price) {
+        if (exchangeItem == null || price == null) {
+            return;
+        }
+        String name = exchangeItem.getDisplayName() != null && !exchangeItem.getDisplayName().isBlank()
+            ? exchangeItem.getDisplayName() : "#" + exchangeItem.getId();
+        this.plugin.getServer().broadcastMessage(
+            "\u00a76" + name + " \u6b63\u5728\u5e02\u573a\u4ee5\u00a7f" + price.toPlainString()
+                + "\u00a76 \u6c42\u8d2d\u4e2d\uff01");
     }
 
     private boolean returnEscrow(Order order) {
