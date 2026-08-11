@@ -3,19 +3,23 @@ package com.github.exchange.notify;
 import com.github.exchange.StockExchangePlugin;
 import java.io.File;
 import java.io.IOException;
+import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.function.Consumer;
 import org.bukkit.Bukkit;
+import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.configuration.file.YamlConfiguration;
 import org.bukkit.entity.Player;
 import org.bukkit.scheduler.BukkitTask;
 
 /**
- * 交易提醒合并缓冲：手动操作结果 5 秒合并、被动成交提醒 15 秒合并；
- * 离线期间的被动提醒持久化到 offline-notices.yml，玩家上线后合并发送。
+ * 交易提醒合并缓冲：手动提醒 5 秒合并；被动成交提醒 5 秒滚动合并（每次新事件续期，
+ * 持续 5 秒无新事件才打包发送），售出/到货按（买家+物品）/物品累加数量与金额。
+ * 离线期间被动提醒与手动提醒持久化到 offline-notices.yml，玩家上线后合并发送。
  */
 public class TradeNoticeBuffer {
     public enum Type {
@@ -27,9 +31,11 @@ public class TradeNoticeBuffer {
     private final long manualDelayTicks;
     private final long passiveDelayTicks;
     private final Map<UUID, List<String>> manualLines = new HashMap<UUID, List<String>>();
-    private final Map<UUID, List<String>> passiveLines = new HashMap<UUID, List<String>>();
+    private final Map<UUID, PassiveNoticeAggregator> passiveOnline =
+        new HashMap<UUID, PassiveNoticeAggregator>();
+    private final Map<UUID, PassiveNoticeAggregator> passiveOffline =
+        new HashMap<UUID, PassiveNoticeAggregator>();
     private final Map<String, BukkitTask> pendingTasks = new HashMap<String, BukkitTask>();
-    private final Map<UUID, List<String>> offlineLines = new HashMap<UUID, List<String>>();
     private final File offlineFile;
 
     public TradeNoticeBuffer(StockExchangePlugin plugin) {
@@ -37,68 +43,103 @@ public class TradeNoticeBuffer {
         this.manualDelayTicks = Math.max(1L,
             plugin.getConfig().getInt("notify.manual_delay_seconds", 5) * 20L);
         this.passiveDelayTicks = Math.max(1L,
-            plugin.getConfig().getInt("notify.passive_delay_seconds", 15) * 20L);
+            plugin.getConfig().getInt("notify.passive_delay_seconds", 5) * 20L);
         this.offlineFile = new File(plugin.getDataFolder(), "offline-notices.yml");
         this.loadOffline();
     }
 
     public void manual(Player player, String message) {
         if (player != null) {
-            this.queue(player.getUniqueId(), Type.MANUAL, message);
+            this.manual(player.getUniqueId(), message);
         }
     }
 
     public void manual(UUID uuid, String message) {
-        this.queue(uuid, Type.MANUAL, message);
-    }
-
-    public void passive(Player player, String message) {
-        if (player != null) {
-            this.queue(player.getUniqueId(), Type.PASSIVE, message);
-        }
-    }
-
-    public void passive(UUID uuid, String message) {
-        this.queue(uuid, Type.PASSIVE, message);
-    }
-
-    private synchronized void queue(UUID uuid, Type type, String message) {
         if (uuid == null || message == null || message.isBlank()) {
             return;
         }
-        if (type == Type.PASSIVE && Bukkit.getPlayer(uuid) == null) {
-            this.offlineLines.computeIfAbsent(uuid, key -> new ArrayList<String>()).add(message);
+        synchronized (this) {
+            this.manualLines.computeIfAbsent(uuid, key -> new ArrayList<String>()).add(message);
+            this.reschedule(uuid, Type.MANUAL);
+        }
+    }
+
+    public void passiveSold(UUID sellerUuid, UUID buyerUuid, String itemName, int quantity,
+                            BigDecimal amount) {
+        if (sellerUuid == null || itemName == null || itemName.isBlank() || quantity <= 0) {
+            return;
+        }
+        String buyerKey = buyerUuid == null ? "?" : buyerUuid.toString();
+        this.queuePassive(sellerUuid,
+            aggregator -> aggregator.addSold(buyerKey, itemName, quantity, amount));
+    }
+
+    public void passiveArrived(UUID buyerUuid, String itemName, int quantity) {
+        if (buyerUuid == null || itemName == null || itemName.isBlank() || quantity <= 0) {
+            return;
+        }
+        this.queuePassive(buyerUuid, aggregator -> aggregator.addArrived(itemName, quantity));
+    }
+
+    private synchronized void queuePassive(UUID uuid, Consumer<PassiveNoticeAggregator> add) {
+        if (Bukkit.getPlayer(uuid) == null) {
+            PassiveNoticeAggregator offline = this.passiveOffline.computeIfAbsent(
+                uuid, key -> new PassiveNoticeAggregator());
+            add.accept(offline);
             this.saveOffline();
             return;
         }
-        Map<UUID, List<String>> lines = type == Type.MANUAL ? this.manualLines : this.passiveLines;
-        List<String> queued = lines.computeIfAbsent(uuid, key -> new ArrayList<String>());
-        boolean first = queued.isEmpty();
-        queued.add(message);
-        if (first) {
-            long delay = type == Type.MANUAL ? this.manualDelayTicks : this.passiveDelayTicks;
-            UUID target = uuid;
-            Type targetType = type;
-            this.pendingTasks.computeIfAbsent(uuid + ":" + type.name(), key ->
-                this.plugin.getServer().getScheduler().runTaskLater(this.plugin,
-                    () -> this.flush(target, targetType), delay));
+        PassiveNoticeAggregator online = this.passiveOnline.computeIfAbsent(
+            uuid, key -> new PassiveNoticeAggregator());
+        add.accept(online);
+        this.reschedule(uuid, Type.PASSIVE);
+    }
+
+    /** 每次新消息都取消旧任务并重新计时，实现“持续有新事件则一直延迟”的滚动窗口。 */
+    private synchronized void reschedule(UUID uuid, Type type) {
+        String key = uuid + ":" + type.name();
+        BukkitTask old = this.pendingTasks.remove(key);
+        if (old != null) {
+            old.cancel();
         }
+        long delay = type == Type.MANUAL ? this.manualDelayTicks : this.passiveDelayTicks;
+        UUID target = uuid;
+        Type targetType = type;
+        this.pendingTasks.put(key, this.plugin.getServer().getScheduler()
+            .runTaskLater(this.plugin, () -> this.flush(target, targetType), delay));
     }
 
     private synchronized void flush(UUID uuid, Type type) {
         this.pendingTasks.remove(uuid + ":" + type.name());
-        Map<UUID, List<String>> lines = type == Type.MANUAL ? this.manualLines : this.passiveLines;
-        List<String> queued = lines.remove(uuid);
-        if (queued == null || queued.isEmpty()) {
+        if (type == Type.MANUAL) {
+            List<String> queued = this.manualLines.remove(uuid);
+            if (queued != null && !queued.isEmpty()) {
+                this.deliverLines(uuid, this.header(type), queued);
+            }
             return;
         }
+        PassiveNoticeAggregator aggregator = this.passiveOnline.remove(uuid);
+        if (aggregator == null || aggregator.isEmpty()) {
+            return;
+        }
+        List<String> lines = aggregator.buildLines(this.plugin.getCurrencyName());
+        if (!lines.isEmpty()) {
+            this.deliverLines(uuid, this.header(type), lines);
+        }
+    }
+
+    private void deliverLines(UUID uuid, String header, List<String> lines) {
         Player player = Bukkit.getPlayer(uuid);
-        if (player == null || !player.isOnline()) {
-            this.offlineLines.computeIfAbsent(uuid, key -> new ArrayList<String>()).addAll(queued);
-            this.saveOffline();
+        if (player != null && player.isOnline()) {
+            this.sendGrouped(player, header, lines);
             return;
         }
-        this.sendGrouped(player, this.header(type), queued);
+        PassiveNoticeAggregator offline = this.passiveOffline.computeIfAbsent(
+            uuid, key -> new PassiveNoticeAggregator());
+        for (String line : lines) {
+            offline.addLegacy(line);
+        }
+        this.saveOffline();
     }
 
     /** 插件关闭前冲刷所有在线缓冲，离线玩家的积攒写入持久化。 */
@@ -107,8 +148,21 @@ public class TradeNoticeBuffer {
             task.cancel();
         }
         this.pendingTasks.clear();
-        this.flushMap(this.manualLines, Type.MANUAL);
-        this.flushMap(this.passiveLines, Type.PASSIVE);
+        for (Map.Entry<UUID, List<String>> entry : new ArrayList<Map.Entry<UUID, List<String>>>(
+            this.manualLines.entrySet())) {
+            this.manualLines.remove(entry.getKey());
+            if (!entry.getValue().isEmpty()) {
+                this.deliverLines(entry.getKey(), this.header(Type.MANUAL), entry.getValue());
+            }
+        }
+        for (Map.Entry<UUID, PassiveNoticeAggregator> entry :
+            new ArrayList<Map.Entry<UUID, PassiveNoticeAggregator>>(this.passiveOnline.entrySet())) {
+            this.passiveOnline.remove(entry.getKey());
+            List<String> lines = entry.getValue().buildLines(this.plugin.getCurrencyName());
+            if (!lines.isEmpty()) {
+                this.deliverLines(entry.getKey(), this.header(Type.PASSIVE), lines);
+            }
+        }
     }
 
     /** 玩家上线：把离线期间积攒的交易提醒合并发送并清理。 */
@@ -116,44 +170,35 @@ public class TradeNoticeBuffer {
         if (player == null) {
             return;
         }
-        List<String> queued;
+        PassiveNoticeAggregator aggregator;
         synchronized (this) {
-            queued = this.offlineLines.remove(player.getUniqueId());
-            if (queued != null && !queued.isEmpty()) {
+            aggregator = this.passiveOffline.remove(player.getUniqueId());
+            if (aggregator != null && !aggregator.isEmpty()) {
                 this.saveOffline();
             }
         }
-        if (queued != null && !queued.isEmpty() && player.isOnline()) {
-            this.sendGrouped(player, "\u00a7e[交易市场·离线交易] \u00a77", queued);
+        if (aggregator == null || aggregator.isEmpty() || !player.isOnline()) {
+            return;
         }
-    }
-
-    private void flushMap(Map<UUID, List<String>> lines, Type type) {
-        for (Map.Entry<UUID, List<String>> entry : new ArrayList<Map.Entry<UUID, List<String>>>(lines.entrySet())) {
-            lines.remove(entry.getKey());
-            Player player = Bukkit.getPlayer(entry.getKey());
-            if (player != null && player.isOnline()) {
-                this.sendGrouped(player, this.header(type), entry.getValue());
-            } else {
-                this.offlineLines.computeIfAbsent(entry.getKey(), key -> new ArrayList<String>()).addAll(entry.getValue());
-                this.saveOffline();
-            }
+        List<String> lines = aggregator.buildLines(this.plugin.getCurrencyName());
+        if (!lines.isEmpty()) {
+            this.sendGrouped(player, "\u00a7e[\u4ea4\u6613\u5e02\u573a\u00b7\u79bb\u7ebf\u4ea4\u6613] \u00a77", lines);
         }
     }
 
     private String header(Type type) {
         return type == Type.MANUAL
-            ? "\u00a7e[交易市场·操作] \u00a77"
-            : "\u00a7e[交易市场·成交] \u00a77";
+            ? "\u00a7e[\u4ea4\u6613\u5e02\u573a\u00b7\u64cd\u4f5c] \u00a77"
+            : "\u00a7e[\u4ea4\u6613\u5e02\u573a\u00b7\u6210\u4ea4] \u00a77";
     }
 
-    private void sendGrouped(Player player, String header, List<String> queued) {
-        StringBuilder sb = new StringBuilder(header);
-        sb.append(queued.get(0));
-        for (int i = 1; i < queued.size(); ++i) {
-            sb.append("\n").append(queued.get(i));
+    private void sendGrouped(Player player, String header, List<String> lines) {
+        StringBuilder builder = new StringBuilder(header);
+        builder.append(lines.get(0));
+        for (int i = 1; i < lines.size(); ++i) {
+            builder.append("\n").append(lines.get(i));
         }
-        player.sendMessage(sb.toString());
+        player.sendMessage(builder.toString());
     }
 
     private void loadOffline() {
@@ -164,24 +209,43 @@ public class TradeNoticeBuffer {
             YamlConfiguration config = YamlConfiguration.loadConfiguration(this.offlineFile);
             for (String key : config.getKeys(false)) {
                 try {
-                    List<String> lines = config.getStringList(key);
-                    if (!lines.isEmpty()) {
-                        this.offlineLines.put(UUID.fromString(key), new ArrayList<String>(lines));
+                    UUID uuid = UUID.fromString(key);
+                    Object value = config.get(key);
+                    PassiveNoticeAggregator aggregator;
+                    if (value instanceof ConfigurationSection) {
+                        aggregator = PassiveNoticeAggregator.fromYaml((ConfigurationSection)value);
+                    } else if (value instanceof List) {
+                        aggregator = new PassiveNoticeAggregator();
+                        for (Object line : (List<?>)value) {
+                            if (line != null) {
+                                aggregator.addLegacy(line.toString());
+                            }
+                        }
+                    } else {
+                        continue;
+                    }
+                    if (!aggregator.isEmpty()) {
+                        this.passiveOffline.put(uuid, aggregator);
                     }
                 }
                 catch (IllegalArgumentException ignored) {}
             }
         }
         catch (Throwable throwable) {
-            this.plugin.getLogger().warning("Failed to load offline trade notices: " + throwable.getMessage());
+            this.plugin.getLogger().warning("Failed to load offline trade notices: "
+                + throwable.getMessage());
         }
     }
 
     private void saveOffline() {
         try {
             YamlConfiguration config = new YamlConfiguration();
-            for (Map.Entry<UUID, List<String>> entry : this.offlineLines.entrySet()) {
-                config.set(entry.getKey().toString(), entry.getValue());
+            for (Map.Entry<UUID, PassiveNoticeAggregator> entry : this.passiveOffline.entrySet()) {
+                if (entry.getValue().isEmpty()) {
+                    continue;
+                }
+                ConfigurationSection section = config.createSection(entry.getKey().toString());
+                entry.getValue().toYaml(section);
             }
             config.save(this.offlineFile);
         }

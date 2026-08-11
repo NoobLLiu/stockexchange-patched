@@ -1861,14 +1861,11 @@ public class OrderManager {
             UUID buyerUuid = this.parseUuid(buyOrder.getPlayerUuid());
             UUID sellerUuid = this.parseUuid(sellOrder.getPlayerUuid());
             if (buyerUuid != null) {
-                this.plugin.getTradeNoticeBuffer().passive(buyerUuid,
-                    "\u00a7a\u4f60\u6c42\u8d2d\u7684\u300c" + itemName + "\u300d x" + quantity + " \u5df2\u5230\u8d27\u3002");
+                this.plugin.getTradeNoticeBuffer().passiveArrived(buyerUuid, itemName, quantity);
             }
             if (sellerUuid != null) {
-                this.plugin.getTradeNoticeBuffer().passive(sellerUuid,
-                    "\u00a7a\u4f60\u7684\u300c" + itemName + "\u300d x" + quantity
-                    + " \u5df2\u552e\u51fa\uff0c\u83b7\u5f97 " + sellerReceives.toPlainString()
-                    + " " + this.plugin.getCurrencyName() + "\u3002");
+                this.plugin.getTradeNoticeBuffer().passiveSold(
+                    sellerUuid, buyerUuid, itemName, quantity, sellerReceives);
             }
         }
         catch (Throwable throwable) {

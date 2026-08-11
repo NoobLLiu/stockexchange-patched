@@ -43,4 +43,4 @@ version: auto
 # Trade notice merge delays (seconds)
 notify:
   manual_delay_seconds: 5
-  passive_delay_seconds: 15
+  passive_delay_seconds: 5
