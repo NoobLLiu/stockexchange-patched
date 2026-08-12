@@ -52,8 +52,7 @@ import org.bukkit.inventory.ItemStack;
  */
 public class WebMarketManager {
 
-    private static final long LISTING_VISIBILITY_MILLIS = TimeUnit.HOURS.toMillis(24L);
-    private static final long SELL_VOLUME_WINDOW_MILLIS = TimeUnit.DAYS.toMillis(7L);
+    private static final long CATALOG_QUERY_VISIBILITY_MILLIS = TimeUnit.HOURS.toMillis(24L);
 
     private final StockExchangePlugin plugin;
     private final Map<String, ReentrantLock> playerLocks = new ConcurrentHashMap<String, ReentrantLock>();
@@ -91,24 +90,24 @@ public class WebMarketManager {
         plugin.getItemManager().ensureSpecialCategories();
         List<ExchangeItem> items = new ArrayList<ExchangeItem>(plugin.getItemManager().getAllItems());
         long now = System.currentTimeMillis();
-        long sellVolumeSince = now - SELL_VOLUME_WINDOW_MILLIS;
         Order.OrderType pageOrderType = buyPage ? Order.OrderType.BUY : Order.OrderType.SELL;
         Map<Integer, Long> activeQuantities = new HashMap<Integer, Long>();
         Map<Integer, Long> latestOrderCreatedAt = new HashMap<Integer, Long>();
-        Map<Integer, Long> recentSellVolumes = new HashMap<Integer, Long>();
+        Map<Integer, BigDecimal> activeSellMarketValues = new HashMap<Integer, BigDecimal>();
         Map<Integer, SpecialCategory> specialCategories = new HashMap<Integer, SpecialCategory>();
         items.removeIf(item -> {
             SpecialCategory category = plugin.getItemManager().getSpecialCategory(item);
             if (category != null) {
                 specialCategories.put(item.getId(), category);
+                List<Order> activeOrders = plugin.getOrderManager().getActiveOrders(item.getId(), pageOrderType);
                 long activeQuantity = MarketPageFilter.activeRemainingQuantity(
-                    plugin.getOrderManager().getActiveOrders(item.getId(), pageOrderType)
+                    activeOrders
                 );
                 activeQuantities.put(item.getId(), activeQuantity);
                 if (!buyPage) {
-                    recentSellVolumes.put(
+                    activeSellMarketValues.put(
                         item.getId(),
-                        plugin.getStorageManager().getTradeVolumeSince(item.getId(), sellVolumeSince)
+                        MarketPageFilter.activeSellMarketValue(activeOrders)
                     );
                 }
                 return false;
@@ -117,16 +116,15 @@ public class WebMarketManager {
             if (rawItemStack != null && SpecialCategory.of(rawItemStack) != null) {
                 return true;
             }
-            long activeQuantity = MarketPageFilter.activeRemainingQuantity(
-                plugin.getOrderManager().getActiveOrders(item.getId(), pageOrderType)
-            );
+            List<Order> activeOrders = plugin.getOrderManager().getActiveOrders(item.getId(), pageOrderType);
+            long activeQuantity = MarketPageFilter.activeRemainingQuantity(activeOrders);
             long latestOrderAt = plugin.getStorageManager().getLatestOrderCreatedAt(item.getId(), pageOrderType);
             activeQuantities.put(item.getId(), activeQuantity);
             latestOrderCreatedAt.put(item.getId(), latestOrderAt);
             if (!buyPage) {
-                recentSellVolumes.put(
+                activeSellMarketValues.put(
                     item.getId(),
-                    plugin.getStorageManager().getTradeVolumeSince(item.getId(), sellVolumeSince)
+                    MarketPageFilter.activeSellMarketValue(activeOrders)
                 );
             }
             if (!buyPage) {
@@ -138,15 +136,14 @@ public class WebMarketManager {
                     latestOrderAt,
                     sellCatalogActivityAt,
                     now,
-                    LISTING_VISIBILITY_MILLIS,
-                    explicitSearch
+                    MarketPageFilter.SELL_CATALOG_VISIBILITY_MILLIS
                 );
             }
             return !MarketPageFilter.isVisibleForQuery(
                 activeQuantity,
                 latestOrderAt,
                 now,
-                LISTING_VISIBILITY_MILLIS,
+                CATALOG_QUERY_VISIBILITY_MILLIS,
                 explicitSearch
             );
         });
@@ -176,30 +173,17 @@ public class WebMarketManager {
                 return Integer.compare(a.getId(), b.getId());
             });
         } else {
-            items.sort((a, b) -> {
-                int categoryCmp = SpecialCategory.compareMarketPagePriority(
+            items.sort((a, b) -> MarketPageFilter.compareSellCatalogEntries(
                     specialCategories.get(a.getId()),
-                    specialCategories.get(b.getId())
-                );
-                if (categoryCmp != 0) {
-                    return categoryCmp;
-                }
-                int cmp = Long.compare(
-                    recentSellVolumes.getOrDefault(b.getId(), 0L),
-                    recentSellVolumes.getOrDefault(a.getId(), 0L)
-                );
-                if (cmp != 0) {
-                    return cmp;
-                }
-                cmp = Long.compare(
+                    activeSellMarketValues.get(a.getId()),
+                    latestOrderCreatedAt.getOrDefault(a.getId(), 0L),
+                    a.getId(),
+                    specialCategories.get(b.getId()),
+                    activeSellMarketValues.get(b.getId()),
                     latestOrderCreatedAt.getOrDefault(b.getId(), 0L),
-                    latestOrderCreatedAt.getOrDefault(a.getId(), 0L)
-                );
-                if (cmp != 0) {
-                    return cmp;
-                }
-                return Integer.compare(a.getId(), b.getId());
-            });
+                    b.getId()
+                )
+            );
         }
         if (explicitSearch) {
             items.removeIf(item -> plugin.getItemManager().getSpecialCategory(item) == null
