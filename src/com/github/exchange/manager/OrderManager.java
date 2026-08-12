@@ -80,7 +80,9 @@ public class OrderManager {
             return creation.error;
         }
         Order order = creation.order;
-        exchangeItem.setLastStockedAt(new Timestamp(System.currentTimeMillis()));
+        Timestamp now = new Timestamp(System.currentTimeMillis());
+        exchangeItem.setLastStockedAt(now);
+        exchangeItem.setLastSellCatalogActivityAt(now);
         exchangeItem.setLastEmptyAt(null);
         this.plugin.getStorageManager().updateExchangeItem(exchangeItem);
         this.plugin.getLogger().info("[AssetAudit] SELL_CREATE player=" + player.getUniqueId()
@@ -967,7 +969,9 @@ public class OrderManager {
             return creation.error();
         }
         Order order = creation.order();
-        exchangeItem.setLastStockedAt(new Timestamp(System.currentTimeMillis()));
+        Timestamp now = new Timestamp(System.currentTimeMillis());
+        exchangeItem.setLastStockedAt(now);
+        exchangeItem.setLastSellCatalogActivityAt(now);
         exchangeItem.setLastEmptyAt(null);
         this.plugin.getStorageManager().updateExchangeItem(exchangeItem);
         this.plugin.getLogger().info("[WebMarket] SELL_CREATE player=" + uuid

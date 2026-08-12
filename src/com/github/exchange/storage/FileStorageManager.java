@@ -147,6 +147,11 @@ implements StorageManager {
             if (config.contains("last_stocked_at")) {
                 item.setLastStockedAt(new Timestamp(config.getLong("last_stocked_at")));
             }
+            if (config.contains("last_sell_catalog_activity_at")) {
+                item.setLastSellCatalogActivityAt(
+                    new Timestamp(config.getLong("last_sell_catalog_activity_at"))
+                );
+            }
             if (config.contains("last_empty_at")) {
                 item.setLastEmptyAt(new Timestamp(config.getLong("last_empty_at")));
             }
@@ -183,6 +188,12 @@ implements StorageManager {
         config.set("created_by_name", (Object)(item.getCreatedByName() != null ? item.getCreatedByName() : ""));
         config.set("created_at", (Object)(item.getCreatedAt() != null ? item.getCreatedAt().getTime() : System.currentTimeMillis()));
         config.set("last_stocked_at", (Object)(item.getLastStockedAt() != null ? item.getLastStockedAt().getTime() : 0L));
+        config.set(
+            "last_sell_catalog_activity_at",
+            (Object)(item.getLastSellCatalogActivityAt() != null
+                ? item.getLastSellCatalogActivityAt().getTime()
+                : 0L)
+        );
         config.set("last_empty_at", (Object)(item.getLastEmptyAt() != null ? item.getLastEmptyAt().getTime() : 0L));
         this.saveYamlAtomically(file, config, "item " + item.getId());
     }

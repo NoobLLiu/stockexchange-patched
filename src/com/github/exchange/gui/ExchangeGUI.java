@@ -315,25 +315,25 @@ implements Listener {
                 plugin.getOrderManager().getActiveOrders(item.getId(), pageOrderType)
             );
             long latestOrderAt = plugin.getStorageManager().getLatestOrderCreatedAt(item.getId(), pageOrderType);
-            if (!isBuy && latestOrderAt <= 0L) {
-                // A newly registered catalog item has no SELL order yet. Keep it
-                // discoverable for the same grace window so the player can open
-                // its detail page and create the first SELL order.
-                long catalogActivityAt = 0L;
-                if (item.getCreatedAt() != null) {
-                    catalogActivityAt = Math.max(catalogActivityAt, item.getCreatedAt().getTime());
-                }
-                if (item.getLastStockedAt() != null) {
-                    catalogActivityAt = Math.max(catalogActivityAt, item.getLastStockedAt().getTime());
-                }
-                latestOrderAt = MarketPageFilter.latestVisibilityAt(latestOrderAt, catalogActivityAt);
-            }
             activeQuantities.put(item.getId(), activeQuantity);
             latestOrderCreatedAt.put(item.getId(), latestOrderAt);
             if (!isBuy) {
                 recentSellVolumes.put(
                     item.getId(),
                     plugin.getStorageManager().getTradeVolumeSince(item.getId(), sellVolumeSince)
+                );
+            }
+            if (!isBuy) {
+                long sellCatalogActivityAt = item.getLastSellCatalogActivityAt() == null
+                    ? 0L
+                    : item.getLastSellCatalogActivityAt().getTime();
+                return !MarketPageFilter.isVisibleOnSellPage(
+                    activeQuantity,
+                    latestOrderAt,
+                    sellCatalogActivityAt,
+                    now,
+                    LISTING_VISIBILITY_MILLIS,
+                    explicitSearch
                 );
             }
             return !MarketPageFilter.isVisibleForQuery(
@@ -2051,7 +2051,11 @@ implements Listener {
         }
         ItemStack preview = source.clone();
         preview.setAmount(1);
-        ItemManager.RegisterResult result = plugin.getItemManager().registerCatalogItem(player, preview);
+        ItemManager.RegisterResult result = plugin.getItemManager().registerCatalogItem(
+            player,
+            preview,
+            !buyOrder
+        );
         player.sendMessage(result.getMessage());
         if (!result.isSuccess()) {
             return;

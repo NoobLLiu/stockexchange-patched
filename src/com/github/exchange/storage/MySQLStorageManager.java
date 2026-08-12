@@ -247,7 +247,7 @@ implements StorageManager {
 
     private void createTables() {
         try (Statement stmt = this.connection.createStatement();){
-            stmt.executeUpdate("CREATE TABLE IF NOT EXISTS exchange_items (  id INT PRIMARY KEY AUTO_INCREMENT,  material VARCHAR(64) NOT NULL,  nbt_hash VARCHAR(64) NOT NULL,  item_base64 TEXT NOT NULL,  display_name VARCHAR(256) NOT NULL,  item_name VARCHAR(256) DEFAULT '',  item_lore TEXT,  created_by_uuid VARCHAR(36),  created_by_name VARCHAR(32),  last_stocked_at BIGINT,  last_empty_at BIGINT,  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,  UNIQUE KEY uk_material_nbt (material, nbt_hash)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+            stmt.executeUpdate("CREATE TABLE IF NOT EXISTS exchange_items (  id INT PRIMARY KEY AUTO_INCREMENT,  material VARCHAR(64) NOT NULL,  nbt_hash VARCHAR(64) NOT NULL,  item_base64 TEXT NOT NULL,  display_name VARCHAR(256) NOT NULL,  item_name VARCHAR(256) DEFAULT '',  item_lore TEXT,  created_by_uuid VARCHAR(36),  created_by_name VARCHAR(32),  last_stocked_at BIGINT,  last_sell_catalog_activity_at BIGINT,  last_empty_at BIGINT,  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,  UNIQUE KEY uk_material_nbt (material, nbt_hash)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
             try {
                 stmt.executeUpdate("ALTER TABLE exchange_items ADD COLUMN item_name VARCHAR(256) DEFAULT ''");
             }
@@ -258,6 +258,7 @@ implements StorageManager {
                 "ALTER TABLE exchange_items ADD COLUMN created_by_uuid VARCHAR(36)",
                 "ALTER TABLE exchange_items ADD COLUMN created_by_name VARCHAR(32)",
                 "ALTER TABLE exchange_items ADD COLUMN last_stocked_at BIGINT",
+                "ALTER TABLE exchange_items ADD COLUMN last_sell_catalog_activity_at BIGINT",
                 "ALTER TABLE exchange_items ADD COLUMN last_empty_at BIGINT"
             }) {
                 try {
@@ -349,6 +350,9 @@ implements StorageManager {
                 item.setCreatedByUuid(rs.getString("created_by_uuid"));
                 item.setCreatedByName(rs.getString("created_by_name"));
                 item.setLastStockedAt(this.readNullableTimestamp(rs, "last_stocked_at"));
+                item.setLastSellCatalogActivityAt(
+                    this.readNullableTimestamp(rs, "last_sell_catalog_activity_at")
+                );
                 item.setLastEmptyAt(this.readNullableTimestamp(rs, "last_empty_at"));
                 this.itemCache.put(item.getId(), item);
             }
@@ -368,7 +372,7 @@ implements StorageManager {
         if (!this.prepareForOperation(false)) {
             return -1;
         }
-        String sql = "INSERT INTO exchange_items (material, nbt_hash, item_base64, display_name, item_name, item_lore, created_by_uuid, created_by_name, last_stocked_at, last_empty_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+        String sql = "INSERT INTO exchange_items (material, nbt_hash, item_base64, display_name, item_name, item_lore, created_by_uuid, created_by_name, last_stocked_at, last_sell_catalog_activity_at, last_empty_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
         try (PreparedStatement ps = this.connection.prepareStatement(sql, 1);){
             ps.setString(1, item.getMaterial());
             ps.setString(2, item.getNbtHash());
@@ -379,7 +383,8 @@ implements StorageManager {
             ps.setString(7, item.getCreatedByUuid());
             ps.setString(8, item.getCreatedByName());
             this.setNullableTimestamp(ps, 9, item.getLastStockedAt());
-            this.setNullableTimestamp(ps, 10, item.getLastEmptyAt());
+            this.setNullableTimestamp(ps, 10, item.getLastSellCatalogActivityAt());
+            this.setNullableTimestamp(ps, 11, item.getLastEmptyAt());
             ps.executeUpdate();
             ResultSet rs = ps.getGeneratedKeys();
             if (!rs.next()) return -1;
@@ -400,7 +405,7 @@ implements StorageManager {
         if (!this.prepareForOperation(false) || item == null || item.getId() <= 0) {
             return;
         }
-        String sql = "UPDATE exchange_items SET material=?, nbt_hash=?, item_base64=?, display_name=?, item_name=?, item_lore=?, created_by_uuid=?, created_by_name=?, last_stocked_at=?, last_empty_at=? WHERE id=?";
+        String sql = "UPDATE exchange_items SET material=?, nbt_hash=?, item_base64=?, display_name=?, item_name=?, item_lore=?, created_by_uuid=?, created_by_name=?, last_stocked_at=?, last_sell_catalog_activity_at=?, last_empty_at=? WHERE id=?";
         try (PreparedStatement ps = this.connection.prepareStatement(sql);){
             ps.setString(1, item.getMaterial());
             ps.setString(2, item.getNbtHash());
@@ -411,8 +416,9 @@ implements StorageManager {
             ps.setString(7, item.getCreatedByUuid());
             ps.setString(8, item.getCreatedByName());
             this.setNullableTimestamp(ps, 9, item.getLastStockedAt());
-            this.setNullableTimestamp(ps, 10, item.getLastEmptyAt());
-            ps.setInt(11, item.getId());
+            this.setNullableTimestamp(ps, 10, item.getLastSellCatalogActivityAt());
+            this.setNullableTimestamp(ps, 11, item.getLastEmptyAt());
+            ps.setInt(12, item.getId());
             ps.executeUpdate();
             this.itemCache.put(item.getId(), item);
         }

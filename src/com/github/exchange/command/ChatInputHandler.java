@@ -318,7 +318,11 @@ implements Listener {
                 this.reopenAddMenu(player, buyOrder);
                 return;
             }
-            ItemManager.RegisterResult result = this.plugin.getItemManager().registerCatalogItem(player, baseItem);
+            ItemManager.RegisterResult result = this.plugin.getItemManager().registerCatalogItem(
+                player,
+                baseItem,
+                !buyOrder
+            );
             player.sendMessage(result.getMessage());
             if (result.isSuccess()) {
                 if (buyOrder) {
@@ -364,7 +368,11 @@ implements Listener {
                     this.reopenAddMenu(player, buyOrder);
                     return;
                 }
-                ItemManager.RegisterResult result = this.plugin.getItemManager().registerCatalogItem(player, baseItem);
+                ItemManager.RegisterResult result = this.plugin.getItemManager().registerCatalogItem(
+                    player,
+                    baseItem,
+                    !buyOrder
+                );
                 player.sendMessage(result.getMessage());
                 if (result.isSuccess()) {
                     if (buyOrder) {

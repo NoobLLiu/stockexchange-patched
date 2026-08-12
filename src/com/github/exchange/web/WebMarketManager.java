@@ -118,22 +118,25 @@ public class WebMarketManager {
                 plugin.getOrderManager().getActiveOrders(item.getId(), pageOrderType)
             );
             long latestOrderAt = plugin.getStorageManager().getLatestOrderCreatedAt(item.getId(), pageOrderType);
-            if (!buyPage && latestOrderAt <= 0L) {
-                long catalogActivityAt = 0L;
-                if (item.getCreatedAt() != null) {
-                    catalogActivityAt = Math.max(catalogActivityAt, item.getCreatedAt().getTime());
-                }
-                if (item.getLastStockedAt() != null) {
-                    catalogActivityAt = Math.max(catalogActivityAt, item.getLastStockedAt().getTime());
-                }
-                latestOrderAt = MarketPageFilter.latestVisibilityAt(latestOrderAt, catalogActivityAt);
-            }
             activeQuantities.put(item.getId(), activeQuantity);
             latestOrderCreatedAt.put(item.getId(), latestOrderAt);
             if (!buyPage) {
                 recentSellVolumes.put(
                     item.getId(),
                     plugin.getStorageManager().getTradeVolumeSince(item.getId(), sellVolumeSince)
+                );
+            }
+            if (!buyPage) {
+                long sellCatalogActivityAt = item.getLastSellCatalogActivityAt() == null
+                    ? 0L
+                    : item.getLastSellCatalogActivityAt().getTime();
+                return !MarketPageFilter.isVisibleOnSellPage(
+                    activeQuantity,
+                    latestOrderAt,
+                    sellCatalogActivityAt,
+                    now,
+                    LISTING_VISIBILITY_MILLIS,
+                    explicitSearch
                 );
             }
             return !MarketPageFilter.isVisibleForQuery(

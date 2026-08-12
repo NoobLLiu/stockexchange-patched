@@ -43,6 +43,33 @@ public final class MarketPageFilter {
         return Math.max(0L, catalogActivityAt);
     }
 
+    /**
+     * A SELL page must only receive its grace-period visibility from SELL-side
+     * catalog activity. BUY-side registration intentionally has no effect.
+     */
+    public static boolean isVisibleOnSellPage(
+        long activeSellQuantity,
+        long latestSellOrderCreatedAt,
+        long sellCatalogActivityAt,
+        long now,
+        long gracePeriodMillis,
+        boolean explicitSearch
+    ) {
+        if (activeSellQuantity > 0L) {
+            return true;
+        }
+        long visibleAt = latestVisibilityAt(
+            latestSellOrderCreatedAt,
+            sellCatalogActivityAt
+        );
+        return visibleAt > 0L && (explicitSearch || isVisibleAfterEmpty(
+            0L,
+            visibleAt,
+            now,
+            gracePeriodMillis
+        ));
+    }
+
     public static boolean isVisibleAfterEmpty(
         long activeQuantity,
         long latestOrderCreatedAt,

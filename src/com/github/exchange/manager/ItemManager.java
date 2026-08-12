@@ -52,14 +52,32 @@ public class ItemManager {
     }
 
     public ExchangeItem registerItem(ItemStack item, Player creator) {
+        return this.registerItem(item, creator, true);
+    }
+
+    public ExchangeItem registerItem(
+        ItemStack item,
+        Player creator,
+        boolean activateSellCatalog
+    ) {
         return this.registerItem(
             item,
             creator == null ? null : creator.getUniqueId().toString(),
-            creator == null ? null : creator.getName()
+            creator == null ? null : creator.getName(),
+            activateSellCatalog
         );
     }
 
     public ExchangeItem registerItem(ItemStack item, String creatorUuid, String creatorName) {
+        return this.registerItem(item, creatorUuid, creatorName, true);
+    }
+
+    private ExchangeItem registerItem(
+        ItemStack item,
+        String creatorUuid,
+        String creatorName,
+        boolean activateSellCatalog
+    ) {
         ExchangeItem special = this.resolveSpecialItem(item);
         if (special != null) {
             return special;
@@ -86,6 +104,9 @@ public class ItemManager {
         }
         ExchangeItem existing = this.plugin.getStorageManager().getExchangeItemByHash(material, nbtHash);
         if (existing != null) {
+            if (activateSellCatalog) {
+                this.markSellCatalogActivity(existing);
+            }
             return existing;
         }
         ExchangeItem exchangeItem = new ExchangeItem();
@@ -102,6 +123,9 @@ public class ItemManager {
         Timestamp now = new Timestamp(System.currentTimeMillis());
         exchangeItem.setCreatedAt(now);
         exchangeItem.setLastStockedAt(now);
+        if (activateSellCatalog) {
+            exchangeItem.setLastSellCatalogActivityAt(now);
+        }
         exchangeItem.setLastEmptyAt(null);
         int id = this.plugin.getStorageManager().insertExchangeItem(exchangeItem);
         if (id > 0) {
@@ -178,13 +202,23 @@ public class ItemManager {
         if (!this.plugin.getStorageManager().addToWarehouse(existing.getItemBase64(), quantity)) {
             return new RegisterResult(false, false, existing, "\u00a7c\u5546\u54c1\u8865\u8d27\u5931\u8d25\uff0c\u8bf7\u91cd\u8bd5\u3002");
         }
-        existing.setLastStockedAt(new Timestamp(System.currentTimeMillis()));
+        Timestamp now = new Timestamp(System.currentTimeMillis());
+        existing.setLastStockedAt(now);
+        existing.setLastSellCatalogActivityAt(now);
         existing.setLastEmptyAt(null);
         this.plugin.getStorageManager().updateExchangeItem(existing);
         return new RegisterResult(true, false, existing, "\u00a7a\u5df2\u4e3a\u5546\u54c1 #" + existing.getId() + " \u8865\u8d27 " + quantity + " \u4e2a\u3002");
     }
 
     public RegisterResult registerCatalogItem(Player player, ItemStack item) {
+        return this.registerCatalogItem(player, item, true);
+    }
+
+    public RegisterResult registerCatalogItem(
+        Player player,
+        ItemStack item,
+        boolean activateSellCatalog
+    ) {
         if (player == null || item == null || item.getType() == Material.AIR) {
             return new RegisterResult(false, false, null, "\u00a7c\u65e0\u6548\u7684\u7269\u54c1\u3002");
         }
@@ -201,6 +235,9 @@ public class ItemManager {
         String nbtHash = ItemSerializer.calculateNbtHash(item);
         ExchangeItem existing = this.plugin.getStorageManager().getExchangeItemByHash(material, nbtHash);
         if (existing != null) {
+            if (activateSellCatalog) {
+                this.markSellCatalogActivity(existing);
+            }
             return new RegisterResult(true, false, existing, "\u00a7a\u8be5\u5546\u54c1\u5df2\u5728\u5e02\u573a\u76ee\u5f55\u4e2d\u3002");
         }
         if (!player.hasPermission("exchange.admin")) {
@@ -209,7 +246,7 @@ public class ItemManager {
                 return new RegisterResult(false, false, null, "\u00a7c\u4f60\u4eca\u5929\u6700\u591a\u53ea\u80fd\u65b0\u589e " + this.plugin.getDailyRegisterLimit() + " \u79cd\u5546\u54c1\u3002");
             }
         }
-        ExchangeItem created = this.registerItem(item, player);
+        ExchangeItem created = this.registerItem(item, player, activateSellCatalog);
         if (created == null) {
             return new RegisterResult(false, false, null, "\u00a7c\u5546\u54c1\u76ee\u5f55\u6dfb\u52a0\u5931\u8d25\u3002");
         }
@@ -222,6 +259,16 @@ public class ItemManager {
 
     /** 网页导出接口：以玩家 UUID 注册目录商品（不要求在线），admin=true 时跳过每日新增上限。 */
     public RegisterResult registerCatalogItem(String playerUuid, String playerName, ItemStack item, boolean admin) {
+        return this.registerCatalogItem(playerUuid, playerName, item, admin, true);
+    }
+
+    public RegisterResult registerCatalogItem(
+        String playerUuid,
+        String playerName,
+        ItemStack item,
+        boolean admin,
+        boolean activateSellCatalog
+    ) {
         if (playerUuid == null || item == null || item.getType() == Material.AIR) {
             return new RegisterResult(false, false, null, "\u00a7c\u65e0\u6548\u7684\u7269\u54c1\u3002");
         }
@@ -238,6 +285,9 @@ public class ItemManager {
         String nbtHash = ItemSerializer.calculateNbtHash(item);
         ExchangeItem existing = this.plugin.getStorageManager().getExchangeItemByHash(material, nbtHash);
         if (existing != null) {
+            if (activateSellCatalog) {
+                this.markSellCatalogActivity(existing);
+            }
             return new RegisterResult(true, false, existing, "\u00a7a\u8be5\u5546\u54c1\u5df2\u5728\u5e02\u573a\u76ee\u5f55\u4e2d\u3002");
         }
         if (!admin) {
@@ -247,7 +297,12 @@ public class ItemManager {
                     + this.plugin.getDailyRegisterLimit() + " \u79cd\u5546\u54c1\u3002");
             }
         }
-        ExchangeItem created = this.registerItem(item, playerUuid, playerName);
+        ExchangeItem created = this.registerItem(
+            item,
+            playerUuid,
+            playerName,
+            activateSellCatalog
+        );
         if (created == null) {
             return new RegisterResult(false, false, null, "\u00a7c\u5546\u54c1\u76ee\u5f55\u6dfb\u52a0\u5931\u8d25\u3002");
         }
@@ -256,6 +311,14 @@ public class ItemManager {
             this.plugin.getStorageManager().setDailyRegisterCount(playerUuid, LocalDate.now(), used + 1);
         }
         return new RegisterResult(true, true, created, "\u00a7a\u5df2\u5c06\u5546\u54c1\u52a0\u5165\u5e02\u573a\u76ee\u5f55\uff0c\u4f60\u73b0\u5728\u53ef\u4ee5\u5728\u5546\u54c1\u8be6\u60c5\u9875\u4e0a\u67b6\u8be5\u7269\u54c1\u3002");
+    }
+
+    private void markSellCatalogActivity(ExchangeItem item) {
+        if (item == null || this.getSpecialCategory(item) != null) {
+            return;
+        }
+        item.setLastSellCatalogActivityAt(new Timestamp(System.currentTimeMillis()));
+        this.plugin.getStorageManager().updateExchangeItem(item);
     }
 
     public void cleanupExpiredEmptyItems() {

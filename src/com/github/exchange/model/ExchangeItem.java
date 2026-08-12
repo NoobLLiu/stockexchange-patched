@@ -17,6 +17,7 @@ public class ExchangeItem {
     private String createdByName;
     private Timestamp createdAt;
     private Timestamp lastStockedAt;
+    private Timestamp lastSellCatalogActivityAt;
     private Timestamp lastEmptyAt;
 
     public ExchangeItem() {
@@ -117,6 +118,14 @@ public class ExchangeItem {
 
     public void setLastStockedAt(Timestamp lastStockedAt) {
         this.lastStockedAt = lastStockedAt;
+    }
+
+    public Timestamp getLastSellCatalogActivityAt() {
+        return this.lastSellCatalogActivityAt;
+    }
+
+    public void setLastSellCatalogActivityAt(Timestamp lastSellCatalogActivityAt) {
+        this.lastSellCatalogActivityAt = lastSellCatalogActivityAt;
     }
 
     public Timestamp getLastEmptyAt() {

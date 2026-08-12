@@ -16,6 +16,10 @@ public final class MarketPageFilterTest {
         assert MarketPageFilter.activeRemainingQuantity(Arrays.asList(activeBuy)) == 8L;
         assert MarketPageFilter.latestVisibilityAt(0L, 950L) == 950L;
         assert MarketPageFilter.latestVisibilityAt(1000L, 950L) == 1000L;
+        assert !MarketPageFilter.isVisibleOnSellPage(0L, 0L, 0L, 1000L, 100L, false);
+        assert !MarketPageFilter.isVisibleOnSellPage(0L, 0L, 0L, 1000L, 100L, true);
+        assert MarketPageFilter.isVisibleOnSellPage(0L, 0L, 950L, 1000L, 100L, false);
+        assert MarketPageFilter.isVisibleOnSellPage(8L, 0L, 0L, 1000L, 100L, false);
         assert MarketPageFilter.isVisibleAfterEmpty(8L, 0L, 1000L, 100L);
         assert MarketPageFilter.isVisibleAfterEmpty(0L, 950L, 1000L, 100L);
         assert !MarketPageFilter.isVisibleAfterEmpty(0L, 900L, 1000L, 100L);
