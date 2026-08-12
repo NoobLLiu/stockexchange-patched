@@ -102,6 +102,10 @@ public class WebMarketManager {
                     activeOrders
                 );
                 activeQuantities.put(item.getId(), activeQuantity);
+                latestOrderCreatedAt.put(
+                    item.getId(),
+                    plugin.getStorageManager().getLatestOrderCreatedAt(item.getId(), pageOrderType)
+                );
                 if (!buyPage) {
                     activeSellMarketValues.put(
                         item.getId(),
