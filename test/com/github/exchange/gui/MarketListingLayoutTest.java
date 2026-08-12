@@ -27,6 +27,10 @@ public final class MarketListingLayoutTest {
         assert MarketListingLayout.pageCount(slotsFor(45), 45) == 1;
         assert MarketListingLayout.pageCount(slotsFor(46), 45) == 2;
         assert MarketListingLayout.pageCount(slotsFor(90), 45) == 2;
+        assert MarketListingLayout.pageCount(slotsFor(36), 36) == 1
+            : "all four item rows must fit on one market-menu page";
+        assert MarketListingLayout.pageCount(slotsFor(37), 36) == 2
+            : "the first item after four rows must start a new market-menu page";
 
         Order low = buyOrder(4, "10.00", 20L);
         Order highLater = buyOrder(5, "25.00", 130, 0, 30L);

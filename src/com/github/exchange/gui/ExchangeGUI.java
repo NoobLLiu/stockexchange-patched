@@ -103,8 +103,11 @@ implements Listener {
     private static final int[] LISTING_DISPLAY_SLOTS = new int[]{9, 10, 11, 12, 13, 14, 15, 16, 17};
     private static final int LISTING_CONFIRM_SLOT = 18;
     private static final int LISTING_CANCEL_SLOT = 26;
+    private static final int ITEM_LIST_PAGE_SIZE = 36;
+    private static final int ITEM_LIST_SEPARATOR_START_SLOT = 36;
+    private static final int ITEM_LIST_SEPARATOR_END_SLOT = 43;
+    private static final int ITEM_LIST_ACTION_SLOT = 44;
     private static final int ITEM_LIST_PREV_SLOT = 51;
-    private static final int ITEM_LIST_SEPARATOR_SLOT = 44;
     private static final int ITEM_LIST_SEARCH_SLOT = 50;
     private static final int LARGE_PREV_SLOT = 45;
     private static final int LARGE_NEXT_SLOT = 52;
@@ -291,7 +294,7 @@ implements Listener {
         String title = "\u00a76\u4ea4\u6613\u5e02\u573a - \u6c42\u8d2d\u5546\u54c1"
             + (query == null ? "" : " - \u641c\u7d22\u7ed3\u679c");
         Inventory inv = Bukkit.createInventory(null, 54, title);
-        int pageSize = 35;
+        int pageSize = ITEM_LIST_PAGE_SIZE;
         int totalPages = MarketListingLayout.pageCount(listingSlots, pageSize);
         int currentPage = Math.max(1, Math.min(page, totalPages));
         int start = (currentPage - 1) * pageSize;
@@ -346,20 +349,22 @@ implements Listener {
                     : "\u00a77\u641c\u7d22\u5173\u952e\u8bcd: \u00a7f" + ExchangeGUI.safeQueryForDisplay(query)
             ));
         }
-        if (slot <= 35) {
-            inv.setItem(35, ExchangeGUI.createItem(
-                Material.EMERALD,
-                "\u00a7c\u6c42\u8d2d\u7269\u54c1",
-                "\u00a77\u9009\u62e9\u7269\u54c1\u5e76\u53d1\u5e03\u6c42\u8d2d\u5355",
-                "\u00a77\u4e0d\u4f1a\u6d88\u8017\u80cc\u5305\u7269\u54c1"
-            ));
-        }
+        inv.setItem(ITEM_LIST_ACTION_SLOT, ExchangeGUI.createItem(
+            Material.EMERALD,
+            "\u00a7c\u6c42\u8d2d\u7269\u54c1",
+            "\u00a77\u9009\u62e9\u7269\u54c1\u5e76\u53d1\u5e03\u6c42\u8d2d\u5355",
+            "\u00a77\u4e0d\u4f1a\u6d88\u8017\u80cc\u5305\u7269\u54c1"
+        ));
         ItemStack separator = ExchangeGUI.createItem(
             new ItemStack(Material.ORANGE_STAINED_GLASS_PANE),
             "\u00a77",
             new String[]{null}
         );
-        for (int separatorSlot = 36; separatorSlot <= ITEM_LIST_SEPARATOR_SLOT; ++separatorSlot) {
+        for (
+            int separatorSlot = ITEM_LIST_SEPARATOR_START_SLOT;
+            separatorSlot <= ITEM_LIST_SEPARATOR_END_SLOT;
+            ++separatorSlot
+        ) {
             inv.setItem(separatorSlot, separator);
         }
         ExchangeGUI.populateMarketFooter(plugin, player, inv, currentPage, totalPages);
@@ -517,7 +522,7 @@ implements Listener {
         String title = "\u00a76\u4ea4\u6613\u5e02\u573a - " + pageName
             + (query == null ? "" : " - \u641c\u7d22\u7ed3\u679c");
         Inventory inv = Bukkit.createInventory(null, 54, title);
-        int pageSize = 35;
+        int pageSize = ITEM_LIST_PAGE_SIZE;
         int totalPages = Math.max(1, (items.size() + pageSize - 1) / pageSize);
         int currentPage = Math.max(1, Math.min(page, totalPages));
         int start = (currentPage - 1) * pageSize;
@@ -588,27 +593,29 @@ implements Listener {
                     : "\u00a77\u641c\u7d22\u5173\u952e\u8bcd: \u00a7f" + ExchangeGUI.safeQueryForDisplay(query)
             ));
         }
-        // Keep the page-specific action in the last content slot.
-        if (slot <= 35) {
-            inv.setItem(35, isBuy
-                ? ExchangeGUI.createItem(
-                    Material.EMERALD,
-                    "\u00a7c\u6c42\u8d2d\u7269\u54c1",
-                    "\u00a77\u9009\u62e9\u7269\u54c1\u5e76\u53d1\u5e03\u6c42\u8d2d\u5355",
-                    "\u00a77\u4e0d\u4f1a\u6d88\u8017\u80cc\u5305\u7269\u54c1"
-                )
-                : ExchangeGUI.createItem(
-                    Material.EMERALD,
-                    "\u00a7a\u4e0a\u67b6\u5546\u54c1",
-                    "\u00a77\u6253\u5f00\u4e0a\u67b6\u83dc\u5355\uff0c\u653e\u5165\u7269\u54c1\u540e\u8f93\u5165\u5355\u4ef7\u7edf\u4e00\u4e0a\u67b6",
-                    "\u00a77\u53d6\u6d88\u6216\u9000\u51fa\u65f6\u653e\u5165\u7684\u7269\u54c1\u4f1a\u5168\u90e8\u8fd8\u8fd8"
-                ));
-        }
+        // Keep the page-specific action at the end of the fifth row.
+        inv.setItem(ITEM_LIST_ACTION_SLOT, isBuy
+            ? ExchangeGUI.createItem(
+                Material.EMERALD,
+                "\u00a7c\u6c42\u8d2d\u7269\u54c1",
+                "\u00a77\u9009\u62e9\u7269\u54c1\u5e76\u53d1\u5e03\u6c42\u8d2d\u5355",
+                "\u00a77\u4e0d\u4f1a\u6d88\u8017\u80cc\u5305\u7269\u54c1"
+            )
+            : ExchangeGUI.createItem(
+                Material.EMERALD,
+                "\u00a7a\u4e0a\u67b6\u5546\u54c1",
+                "\u00a77\u6253\u5f00\u4e0a\u67b6\u83dc\u5355\uff0c\u653e\u5165\u7269\u54c1\u540e\u8f93\u5165\u5355\u4ef7\u7edf\u4e00\u4e0a\u67b6",
+                "\u00a77\u53d6\u6d88\u6216\u9000\u51fa\u65f6\u653e\u5165\u7684\u7269\u54c1\u4f1a\u5168\u90e8\u8fd8\u8fd8"
+            ));
         Material separatorMaterial = isBuy
             ? Material.ORANGE_STAINED_GLASS_PANE
             : Material.GREEN_STAINED_GLASS_PANE;
         ItemStack separator = ExchangeGUI.createItem(new ItemStack(separatorMaterial), "\u00a77", new String[]{null});
-        for (int separatorSlot = 36; separatorSlot <= ITEM_LIST_SEPARATOR_SLOT; ++separatorSlot) {
+        for (
+            int separatorSlot = ITEM_LIST_SEPARATOR_START_SLOT;
+            separatorSlot <= ITEM_LIST_SEPARATOR_END_SLOT;
+            ++separatorSlot
+        ) {
             inv.setItem(separatorSlot, separator);
         }
         ExchangeGUI.populateMarketFooter(plugin, player, inv, currentPage, totalPages);
@@ -1704,7 +1711,7 @@ implements Listener {
                     ExchangeGUI.openItemList(plugin, clicker, guiPage.getOrDefault(uuid, 1));
                     break;
                 }
-                if (event.getRawSlot() == 35 && rawSlotIsTopInventory(event, 54)) {
+                if (event.getRawSlot() == ITEM_LIST_ACTION_SLOT && rawSlotIsTopInventory(event, 54)) {
                     guiNavigating.put(uuid, true);
                     if (ExchangeGUI.isBuyPage(plugin, clicker)) {
                         ExchangeGUI.openAddBuyItemMenu(plugin, clicker, guiPage.getOrDefault(uuid, 1));
