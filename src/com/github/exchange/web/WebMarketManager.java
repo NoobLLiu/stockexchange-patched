@@ -94,11 +94,9 @@ public class WebMarketManager {
         Map<Integer, Long> activeQuantities = new HashMap<Integer, Long>();
         Map<Integer, Long> latestOrderCreatedAt = new HashMap<Integer, Long>();
         Map<Integer, BigDecimal> activeSellMarketValues = new HashMap<Integer, BigDecimal>();
-        Map<Integer, SpecialCategory> specialCategories = new HashMap<Integer, SpecialCategory>();
         items.removeIf(item -> {
             SpecialCategory category = plugin.getItemManager().getSpecialCategory(item);
             if (category != null) {
-                specialCategories.put(item.getId(), category);
                 List<Order> activeOrders = plugin.getOrderManager().getActiveOrders(item.getId(), pageOrderType);
                 long activeQuantity = MarketPageFilter.activeRemainingQuantity(
                     activeOrders
@@ -149,13 +147,6 @@ public class WebMarketManager {
         });
         if (buyPage) {
             items.sort((a, b) -> {
-                int categoryCmp = SpecialCategory.compareMarketPagePriority(
-                    specialCategories.get(a.getId()),
-                    specialCategories.get(b.getId())
-                );
-                if (categoryCmp != 0) {
-                    return categoryCmp;
-                }
                 int cmp = Long.compare(
                     activeQuantities.getOrDefault(b.getId(), 0L),
                     activeQuantities.getOrDefault(a.getId(), 0L)
@@ -174,11 +165,9 @@ public class WebMarketManager {
             });
         } else {
             items.sort((a, b) -> MarketPageFilter.compareSellCatalogEntries(
-                    specialCategories.get(a.getId()),
                     activeSellMarketValues.get(a.getId()),
                     latestOrderCreatedAt.getOrDefault(a.getId(), 0L),
                     a.getId(),
-                    specialCategories.get(b.getId()),
                     activeSellMarketValues.get(b.getId()),
                     latestOrderCreatedAt.getOrDefault(b.getId(), 0L),
                     b.getId()

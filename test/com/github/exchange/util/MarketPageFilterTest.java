@@ -28,16 +28,16 @@ public final class MarketPageFilterTest {
         ).compareTo(new BigDecimal("30.00")) == 0
             : "sell market value must sum only active SELL remaining quantity times unit price";
         assert MarketPageFilter.compareSellCatalogEntries(
-            null, new BigDecimal("30.00"), 100L, 1,
-            null, new BigDecimal("29.99"), 999L, 2
+            new BigDecimal("30.00"), 100L, 1,
+            new BigDecimal("29.99"), 999L, 2
         ) < 0 : "ordinary sell entries must sort by hidden market value descending";
         assert MarketPageFilter.compareSellCatalogEntries(
-            SpecialCategory.MUSIC_DISC, BigDecimal.ZERO, 0L, 10,
-            null, new BigDecimal("99999.99"), 999L, 1
-        ) < 0 : "special categories must remain ahead of ordinary sell entries";
+            BigDecimal.ZERO, 0L, 10,
+            new BigDecimal("99999.99"), 999L, 1
+        ) > 0 : "special categories must participate in the same market-value ranking";
         assert MarketPageFilter.compareSellCatalogEntries(
-            null, new BigDecimal("30.00"), 100L, 1,
-            null, new BigDecimal("30.00"), 99L, 2
+            new BigDecimal("30.00"), 100L, 1,
+            new BigDecimal("30.00"), 99L, 2
         ) < 0 : "equal market values must keep the newer sell entry first";
         assert MarketPageFilter.latestVisibilityAt(0L, 950L) == 950L;
         assert MarketPageFilter.latestVisibilityAt(1000L, 950L) == 1000L;

@@ -34,23 +34,6 @@ public enum SpecialCategory {
         return this.representativeMaterial;
     }
 
-    /**
-     * Pins aggregate categories before ordinary market items while retaining
-     * their declaration order as a stable order within the pinned section.
-     */
-    public static int compareMarketPagePriority(SpecialCategory left, SpecialCategory right) {
-        if (left == right) {
-            return 0;
-        }
-        if (left == null) {
-            return 1;
-        }
-        if (right == null) {
-            return -1;
-        }
-        return Integer.compare(left.ordinal(), right.ordinal());
-    }
-
     public static SpecialCategory of(ItemStack item) {
         if (item == null || item.getType() == Material.AIR) {
             return null;

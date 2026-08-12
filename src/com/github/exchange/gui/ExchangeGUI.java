@@ -66,6 +66,7 @@ import org.bukkit.inventory.Inventory;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.meta.ItemMeta;
 import org.bukkit.persistence.PersistentDataType;
+import org.bukkit.scheduler.BukkitTask;
 import org.geysermc.cumulus.form.SimpleForm;
 import org.geysermc.floodgate.api.FloodgateApi;
 
@@ -81,6 +82,8 @@ implements Listener {
     private static final Map<UUID, Map<Integer, String>> guiWarehouseEntries = new HashMap<UUID, Map<Integer, String>>();
     private static final Map<UUID, String> guiSearchQueries = new HashMap<UUID, String>();
     private static final Map<UUID, Map<String, Integer>> listingPending = new HashMap<UUID, Map<String, Integer>>();
+    private static final Map<UUID, BukkitTask> categoryIconRotationTasks = new HashMap<UUID, BukkitTask>();
+    private static final Map<UUID, Inventory> categoryIconRotationInventories = new HashMap<UUID, Inventory>();
     private static final String MAIN_MENU = "main";
     private static final String ITEM_LIST = "item_list";
     private static final String ITEM_DETAIL = "item_detail";
@@ -367,7 +370,13 @@ implements Listener {
             inv.setItem(separatorSlot, separator);
         }
         ExchangeGUI.populateMarketFooter(plugin, player, inv, currentPage, totalPages);
-        ExchangeGUI.finishOpeningItemList(player, inv, currentPage);
+        ExchangeGUI.finishOpeningItemList(
+            plugin,
+            player,
+            inv,
+            currentPage,
+            new HashMap<Integer, CategoryIconRotationSlot>()
+        );
     }
 
     private static List<MarketListingLayout.Slot> collectBuyOrderSlots(
@@ -407,16 +416,18 @@ implements Listener {
         Map<Integer, Long> activeQuantities = new HashMap<Integer, Long>();
         Map<Integer, Long> latestOrderCreatedAt = new HashMap<Integer, Long>();
         Map<Integer, BigDecimal> activeSellMarketValues = new HashMap<Integer, BigDecimal>();
-        Map<Integer, SpecialCategory> specialCategories = new HashMap<Integer, SpecialCategory>();
         items.removeIf(item -> {
             SpecialCategory category = plugin.getItemManager().getSpecialCategory(item);
             if (category != null) {
-                specialCategories.put(item.getId(), category);
                 List<Order> activeOrders = plugin.getOrderManager().getActiveOrders(item.getId(), pageOrderType);
                 long activeQuantity = MarketPageFilter.activeRemainingQuantity(
                     activeOrders
                 );
                 activeQuantities.put(item.getId(), activeQuantity);
+                latestOrderCreatedAt.put(
+                    item.getId(),
+                    plugin.getStorageManager().getLatestOrderCreatedAt(item.getId(), pageOrderType)
+                );
                 if (!isBuy) {
                     activeSellMarketValues.put(
                         item.getId(),
@@ -462,13 +473,6 @@ implements Listener {
         });
         if (isBuy) {
             items.sort((a, b) -> {
-                int categoryCmp = SpecialCategory.compareMarketPagePriority(
-                    specialCategories.get(a.getId()),
-                    specialCategories.get(b.getId())
-                );
-                if (categoryCmp != 0) {
-                    return categoryCmp;
-                }
                 int cmp = Long.compare(
                     activeQuantities.getOrDefault(b.getId(), 0L),
                     activeQuantities.getOrDefault(a.getId(), 0L)
@@ -487,11 +491,9 @@ implements Listener {
             });
         } else {
             items.sort((a, b) -> MarketPageFilter.compareSellCatalogEntries(
-                    specialCategories.get(a.getId()),
                     activeSellMarketValues.get(a.getId()),
                     latestOrderCreatedAt.getOrDefault(a.getId(), 0L),
                     a.getId(),
-                    specialCategories.get(b.getId()),
                     activeSellMarketValues.get(b.getId()),
                     latestOrderCreatedAt.getOrDefault(b.getId(), 0L),
                     b.getId()
@@ -512,27 +514,40 @@ implements Listener {
         int start = (currentPage - 1) * pageSize;
         int end = Math.min(start + pageSize, items.size());
         int slot = 0;
+        Map<Integer, CategoryIconRotationSlot> categoryIconRotationSlots =
+            new HashMap<Integer, CategoryIconRotationSlot>();
         for (int idx = start; idx < end; ++idx) {
             ExchangeItem item = items.get(idx);
             ItemStack baseItem = ItemSerializer.itemFromBase64(item.getItemBase64());
             if (baseItem == null) continue;
             String displayName = ExchangeGUI.resolveDisplayName(item, baseItem);
+            SpecialCategory specialCategory = plugin.getItemManager().getSpecialCategory(item);
+            if (specialCategory != null) {
+                long stock = activeQuantities.getOrDefault(item.getId(), 0L);
+                List<ItemStack> iconItems = isBuy
+                    ? new ArrayList<ItemStack>()
+                    : ExchangeGUI.collectSpecialCategorySellIcons(plugin, item, specialCategory);
+                List<ItemStack> displayVariants = ExchangeGUI.createSpecialCategoryDisplayVariants(
+                    plugin,
+                    item,
+                    baseItem,
+                    displayName,
+                    stock,
+                    iconItems
+                );
+                ItemStack displayItem = displayVariants.get(0);
+                if (!isBuy && stock > 0L) {
+                    categoryIconRotationSlots.put(
+                        slot,
+                        new CategoryIconRotationSlot(item.getId(), specialCategory)
+                    );
+                }
+                inv.setItem(slot++, displayItem);
+                continue;
+            }
             ItemStack displayItem = ExchangeGUI.createMarketVoucher(baseItem, displayName);
             ItemMeta meta = displayItem.getItemMeta();
-            if (plugin.getItemManager().getSpecialCategory(item) != null) {
-                long stock = activeQuantities.getOrDefault(item.getId(), 0L);
-                meta.setDisplayName("\u00a7f" + displayName);
-                ArrayList<String> lore = new ArrayList<String>();
-                lore.add("\u00a77\u5b58\u8d27\u91cf: \u00a7f" + stock);
-                lore.add("");
-                lore.add("\u00a7e\u70b9\u51fb\u67e5\u770b\u5546\u54c1\u8be6\u60c5");
-                meta.setLore(lore);
-                meta.getPersistentDataContainer().set(
-                    ExchangeGUI.categoryItemIdKey(plugin),
-                    PersistentDataType.INTEGER,
-                    item.getId()
-                );
-            } else if (isBuy) {
+            if (isBuy) {
                 BigDecimal highestBuy = plugin.getOrderManager().getHighestBuyPrice(item.getId());
                 long buyStock = activeQuantities.getOrDefault(item.getId(), 0L);
                 String buyPriceText = highestBuy == null ? "\u00a77\u6682\u65e0" : ExchangeGUI.formatHighlightedPrice(highestBuy);
@@ -603,7 +618,7 @@ implements Listener {
             inv.setItem(separatorSlot, separator);
         }
         ExchangeGUI.populateMarketFooter(plugin, player, inv, currentPage, totalPages);
-        ExchangeGUI.finishOpeningItemList(player, inv, currentPage);
+        ExchangeGUI.finishOpeningItemList(plugin, player, inv, currentPage, categoryIconRotationSlots);
     }
 
     public static void openCatalogSearchResults(
@@ -684,11 +699,239 @@ implements Listener {
         ));
     }
 
-    private static void finishOpeningItemList(Player player, Inventory inv, int currentPage) {
-        guiState.put(player.getUniqueId(), ITEM_LIST);
-        guiItemId.remove(player.getUniqueId());
-        guiPage.put(player.getUniqueId(), currentPage);
+    private static void finishOpeningItemList(
+        StockExchangePlugin plugin,
+        Player player,
+        Inventory inv,
+        int currentPage,
+        Map<Integer, CategoryIconRotationSlot> categoryIconRotationSlots
+    ) {
+        UUID uuid = player.getUniqueId();
+        ExchangeGUI.cancelCategoryIconRotation(uuid, null);
+        guiState.put(uuid, ITEM_LIST);
+        guiItemId.remove(uuid);
+        guiPage.put(uuid, currentPage);
         player.openInventory(inv);
+        ExchangeGUI.startCategoryIconRotation(
+            plugin,
+            player,
+            inv,
+            categoryIconRotationSlots
+        );
+    }
+
+    private static void startCategoryIconRotation(
+        StockExchangePlugin plugin,
+        Player player,
+        Inventory inv,
+        Map<Integer, CategoryIconRotationSlot> categoryIconRotationSlots
+    ) {
+        if (categoryIconRotationSlots == null || categoryIconRotationSlots.isEmpty()) {
+            return;
+        }
+        UUID uuid = player.getUniqueId();
+        long openedAt = System.currentTimeMillis();
+        BukkitTask[] taskHolder = new BukkitTask[1];
+        BukkitTask task = Bukkit.getScheduler().runTaskTimer(plugin, () -> {
+            Inventory rotatingInventory = categoryIconRotationInventories.get(uuid);
+            if (!player.isOnline()
+                || rotatingInventory != inv
+                || !ITEM_LIST.equals(guiState.get(uuid))
+                || player.getOpenInventory().getTopInventory() != inv) {
+                if (rotatingInventory == inv) {
+                    ExchangeGUI.cancelCategoryIconRotation(uuid, inv);
+                } else if (taskHolder[0] != null) {
+                    taskHolder[0].cancel();
+                }
+                return;
+            }
+            long elapsedSeconds = Math.max(0L, (System.currentTimeMillis() - openedAt) / 1000L);
+            for (Map.Entry<Integer, CategoryIconRotationSlot> entry : categoryIconRotationSlots.entrySet()) {
+                ExchangeGUI.refreshSpecialCategoryIcon(
+                    plugin,
+                    inv,
+                    entry.getKey(),
+                    entry.getValue(),
+                    elapsedSeconds
+                );
+            }
+        }, 20L, 20L);
+        taskHolder[0] = task;
+        categoryIconRotationInventories.put(uuid, inv);
+        categoryIconRotationTasks.put(uuid, task);
+    }
+
+    private static void refreshSpecialCategoryIcon(
+        StockExchangePlugin plugin,
+        Inventory inv,
+        int slot,
+        CategoryIconRotationSlot rotationSlot,
+        long elapsedSeconds
+    ) {
+        if (rotationSlot == null) {
+            return;
+        }
+        ExchangeItem categoryItem = plugin.getItemManager().getItem(rotationSlot.categoryItemId);
+        if (categoryItem == null) {
+            return;
+        }
+        ItemStack categoryBase = ItemSerializer.itemFromBase64(categoryItem.getItemBase64());
+        if (categoryBase == null) {
+            return;
+        }
+        List<Order> sellOrders = plugin.getOrderManager().getActiveOrders(
+            categoryItem.getId(),
+            Order.OrderType.SELL
+        );
+        long stock = MarketPageFilter.activeRemainingQuantity(sellOrders);
+        List<ItemStack> displayVariants = ExchangeGUI.createSpecialCategoryDisplayVariants(
+            plugin,
+            categoryItem,
+            categoryBase,
+            ExchangeGUI.resolveDisplayName(categoryItem, categoryBase),
+            stock,
+            ExchangeGUI.collectSpecialCategorySellIcons(
+                plugin,
+                categoryItem,
+                rotationSlot.category
+            )
+        );
+        int displayIndex = MarketCategoryIconRotation.indexForSecond(
+            elapsedSeconds,
+            displayVariants.size()
+        );
+        if (displayIndex >= 0) {
+            inv.setItem(slot, displayVariants.get(displayIndex));
+        }
+    }
+
+    private static List<ItemStack> collectSpecialCategorySellIcons(
+        StockExchangePlugin plugin,
+        ExchangeItem categoryItem,
+        SpecialCategory category
+    ) {
+        List<String> iconBase64s = new ArrayList<String>();
+        if (categoryItem == null || category == null) {
+            return new ArrayList<ItemStack>();
+        }
+        List<Order> sellOrders = new ArrayList<Order>(
+            plugin.getOrderManager().getActiveOrders(categoryItem.getId(), Order.OrderType.SELL)
+        );
+        sellOrders.sort(Comparator.comparingInt(Order::getId));
+        for (Order sellOrder : sellOrders) {
+            if (sellOrder == null
+                || sellOrder.getOrderType() != Order.OrderType.SELL
+                || !sellOrder.isActiveForCalculation()
+                || sellOrder.getRemainingQty() <= 0) {
+                continue;
+            }
+            EscrowEntry escrow = plugin.getStorageManager().getEscrow(
+                sellOrder.getId(),
+                EscrowEntry.AssetType.ITEM
+            );
+            if (escrow == null
+                || escrow.getQuantity() <= 0
+                || escrow.getItemBase64() == null
+                || escrow.getItemBase64().isBlank()) {
+                continue;
+            }
+            ItemStack actualItem = ItemSerializer.itemFromBase64(escrow.getItemBase64());
+            if (SpecialCategory.of(actualItem) == category) {
+                actualItem.setAmount(1);
+                iconBase64s.add(ItemSerializer.itemToBase64(actualItem));
+            }
+        }
+        List<ItemStack> icons = new ArrayList<ItemStack>();
+        for (String itemBase64 : MarketCategoryIconRotation.distinctStableIconKeys(iconBase64s)) {
+            ItemStack icon = ItemSerializer.itemFromBase64(itemBase64);
+            if (icon != null && icon.getType() != Material.AIR) {
+                icon.setAmount(1);
+                icons.add(icon);
+            }
+        }
+        return icons;
+    }
+
+    private static List<ItemStack> createSpecialCategoryDisplayVariants(
+        StockExchangePlugin plugin,
+        ExchangeItem categoryItem,
+        ItemStack categoryBase,
+        String displayName,
+        long stock,
+        List<ItemStack> iconItems
+    ) {
+        List<ItemStack> displayVariants = new ArrayList<ItemStack>();
+        if (iconItems != null) {
+            for (ItemStack iconItem : iconItems) {
+                if (iconItem != null && iconItem.getType() != Material.AIR) {
+                    displayVariants.add(ExchangeGUI.createSpecialCategoryDisplayItem(
+                        plugin,
+                        categoryItem,
+                        iconItem,
+                        displayName,
+                        stock
+                    ));
+                }
+            }
+        }
+        if (displayVariants.isEmpty()) {
+            displayVariants.add(ExchangeGUI.createSpecialCategoryDisplayItem(
+                plugin,
+                categoryItem,
+                categoryBase,
+                displayName,
+                stock
+            ));
+        }
+        return displayVariants;
+    }
+
+    private static ItemStack createSpecialCategoryDisplayItem(
+        StockExchangePlugin plugin,
+        ExchangeItem categoryItem,
+        ItemStack iconItem,
+        String displayName,
+        long stock
+    ) {
+        ItemStack displayItem = ExchangeGUI.createMarketVoucher(iconItem, displayName);
+        ItemMeta meta = displayItem.getItemMeta();
+        if (meta != null) {
+            meta.setDisplayName("\u00a7f" + displayName);
+            ArrayList<String> lore = new ArrayList<String>();
+            lore.add("\u00a77\u5b58\u8d27\u91cf: \u00a7f" + stock);
+            lore.add("");
+            lore.add("\u00a7e\u70b9\u51fb\u67e5\u770b\u5546\u54c1\u8be6\u60c5");
+            meta.setLore(lore);
+            meta.getPersistentDataContainer().set(
+                ExchangeGUI.categoryItemIdKey(plugin),
+                PersistentDataType.INTEGER,
+                categoryItem.getId()
+            );
+            displayItem.setItemMeta(meta);
+        }
+        return displayItem;
+    }
+
+    private static void cancelCategoryIconRotation(UUID uuid, Inventory expectedInventory) {
+        Inventory rotatingInventory = categoryIconRotationInventories.get(uuid);
+        if (expectedInventory != null && rotatingInventory != expectedInventory) {
+            return;
+        }
+        categoryIconRotationInventories.remove(uuid);
+        BukkitTask task = categoryIconRotationTasks.remove(uuid);
+        if (task != null) {
+            task.cancel();
+        }
+    }
+
+    private static final class CategoryIconRotationSlot {
+        private final int categoryItemId;
+        private final SpecialCategory category;
+
+        private CategoryIconRotationSlot(int categoryItemId, SpecialCategory category) {
+            this.categoryItemId = categoryItemId;
+            this.category = category;
+        }
     }
 
     public static void openCurrencyExchangeMenu(StockExchangePlugin plugin, Player player) {
@@ -2159,6 +2402,7 @@ implements Listener {
     @EventHandler
     public void onInventoryClose(InventoryCloseEvent event) {
         UUID uuid = event.getPlayer().getUniqueId();
+        ExchangeGUI.cancelCategoryIconRotation(uuid, event.getInventory());
         if (event.getPlayer() instanceof Player player) {
             ExchangeGUI.scheduleVoucherCleanup(player);
             ExchangeGUI.saveMarketPage(StockExchangePlugin.getInstance(), player);
@@ -2188,6 +2432,7 @@ implements Listener {
     public void onPlayerQuit(PlayerQuitEvent event) {
         Player player = event.getPlayer();
         UUID uuid = player.getUniqueId();
+        ExchangeGUI.cancelCategoryIconRotation(uuid, null);
         ExchangeGUI.saveMarketPage(StockExchangePlugin.getInstance(), player);
         Map<String, Integer> pending = listingPending.remove(uuid);
         if (pending != null && !pending.isEmpty()) {

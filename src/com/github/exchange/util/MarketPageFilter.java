@@ -65,23 +65,18 @@ public final class MarketPageFilter {
     }
 
     /**
-     * Sorts the sell catalog without exposing market value to players:
-     * special categories first, then active sell market value descending.
+     * Sorts every sell catalog entry by its hidden active market value without
+     * exposing that value to players. Aggregate categories intentionally use
+     * the exact same ranking as ordinary catalog entries.
      */
     public static int compareSellCatalogEntries(
-        SpecialCategory leftCategory,
         BigDecimal leftMarketValue,
         long leftLatestOrderCreatedAt,
         int leftItemId,
-        SpecialCategory rightCategory,
         BigDecimal rightMarketValue,
         long rightLatestOrderCreatedAt,
         int rightItemId
     ) {
-        int categoryComparison = SpecialCategory.compareMarketPagePriority(leftCategory, rightCategory);
-        if (categoryComparison != 0) {
-            return categoryComparison;
-        }
         int marketValueComparison = safeMarketValue(rightMarketValue).compareTo(safeMarketValue(leftMarketValue));
         if (marketValueComparison != 0) {
             return marketValueComparison;
