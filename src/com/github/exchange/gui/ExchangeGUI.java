@@ -370,15 +370,30 @@ implements Listener {
         StockExchangePlugin plugin,
         String query
     ) {
+        plugin.getItemManager().ensureSpecialCategories();
         List<Order> buyOrders = new ArrayList<Order>();
+        Map<Integer, SpecialCategory> specialCategories = new HashMap<Integer, SpecialCategory>();
         for (ExchangeItem item : plugin.getItemManager().getAllItems()) {
-            if (item == null || (query != null && !ExchangeGUI.matchesCatalogSearch(plugin, item, query))) {
+            if (item == null) {
+                continue;
+            }
+            SpecialCategory category = plugin.getItemManager().getSpecialCategory(item);
+            if (category != null) {
+                specialCategories.put(item.getId(), category);
+            } else if (query != null && !ExchangeGUI.matchesCatalogSearch(plugin, item, query)) {
                 continue;
             }
             buyOrders.addAll(plugin.getOrderManager().getActiveOrders(item.getId(), Order.OrderType.BUY));
         }
         List<MarketListingLayout.Slot> slots = new ArrayList<MarketListingLayout.Slot>();
-        for (Order buyOrder : MarketListingLayout.sortBuyOrders(buyOrders)) {
+        buyOrders.sort((a, b) -> {
+            int categoryCmp = SpecialCategory.compareMarketPagePriority(
+                specialCategories.get(a.getItemId()),
+                specialCategories.get(b.getItemId())
+            );
+            return categoryCmp != 0 ? categoryCmp : MarketListingLayout.compareBuyOrders(a, b);
+        });
+        for (Order buyOrder : buyOrders) {
             ExchangeItem item = plugin.getItemManager().getItem(buyOrder.getItemId());
             if (item == null) {
                 continue;
@@ -404,8 +419,11 @@ implements Listener {
         Map<Integer, Long> activeQuantities = new HashMap<Integer, Long>();
         Map<Integer, Long> latestOrderCreatedAt = new HashMap<Integer, Long>();
         Map<Integer, Long> recentSellVolumes = new HashMap<Integer, Long>();
+        Map<Integer, SpecialCategory> specialCategories = new HashMap<Integer, SpecialCategory>();
         items.removeIf(item -> {
-            if (plugin.getItemManager().getSpecialCategory(item) != null) {
+            SpecialCategory category = plugin.getItemManager().getSpecialCategory(item);
+            if (category != null) {
+                specialCategories.put(item.getId(), category);
                 long activeQuantity = MarketPageFilter.activeRemainingQuantity(
                     plugin.getOrderManager().getActiveOrders(item.getId(), pageOrderType)
                 );
@@ -457,6 +475,13 @@ implements Listener {
         });
         if (isBuy) {
             items.sort((a, b) -> {
+                int categoryCmp = SpecialCategory.compareMarketPagePriority(
+                    specialCategories.get(a.getId()),
+                    specialCategories.get(b.getId())
+                );
+                if (categoryCmp != 0) {
+                    return categoryCmp;
+                }
                 int cmp = Long.compare(
                     activeQuantities.getOrDefault(b.getId(), 0L),
                     activeQuantities.getOrDefault(a.getId(), 0L)
@@ -475,6 +500,13 @@ implements Listener {
             });
         } else {
             items.sort((a, b) -> {
+                int categoryCmp = SpecialCategory.compareMarketPagePriority(
+                    specialCategories.get(a.getId()),
+                    specialCategories.get(b.getId())
+                );
+                if (categoryCmp != 0) {
+                    return categoryCmp;
+                }
                 int cmp = Long.compare(
                     recentSellVolumes.getOrDefault(b.getId(), 0L),
                     recentSellVolumes.getOrDefault(a.getId(), 0L)

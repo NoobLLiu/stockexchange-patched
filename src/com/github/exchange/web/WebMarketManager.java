@@ -96,8 +96,11 @@ public class WebMarketManager {
         Map<Integer, Long> activeQuantities = new HashMap<Integer, Long>();
         Map<Integer, Long> latestOrderCreatedAt = new HashMap<Integer, Long>();
         Map<Integer, Long> recentSellVolumes = new HashMap<Integer, Long>();
+        Map<Integer, SpecialCategory> specialCategories = new HashMap<Integer, SpecialCategory>();
         items.removeIf(item -> {
-            if (plugin.getItemManager().getSpecialCategory(item) != null) {
+            SpecialCategory category = plugin.getItemManager().getSpecialCategory(item);
+            if (category != null) {
+                specialCategories.put(item.getId(), category);
                 long activeQuantity = MarketPageFilter.activeRemainingQuantity(
                     plugin.getOrderManager().getActiveOrders(item.getId(), pageOrderType)
                 );
@@ -149,6 +152,13 @@ public class WebMarketManager {
         });
         if (buyPage) {
             items.sort((a, b) -> {
+                int categoryCmp = SpecialCategory.compareMarketPagePriority(
+                    specialCategories.get(a.getId()),
+                    specialCategories.get(b.getId())
+                );
+                if (categoryCmp != 0) {
+                    return categoryCmp;
+                }
                 int cmp = Long.compare(
                     activeQuantities.getOrDefault(b.getId(), 0L),
                     activeQuantities.getOrDefault(a.getId(), 0L)
@@ -167,6 +177,13 @@ public class WebMarketManager {
             });
         } else {
             items.sort((a, b) -> {
+                int categoryCmp = SpecialCategory.compareMarketPagePriority(
+                    specialCategories.get(a.getId()),
+                    specialCategories.get(b.getId())
+                );
+                if (categoryCmp != 0) {
+                    return categoryCmp;
+                }
                 int cmp = Long.compare(
                     recentSellVolumes.getOrDefault(b.getId(), 0L),
                     recentSellVolumes.getOrDefault(a.getId(), 0L)

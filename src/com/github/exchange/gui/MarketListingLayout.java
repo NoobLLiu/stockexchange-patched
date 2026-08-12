@@ -48,16 +48,27 @@ public final class MarketListingLayout {
                 }
             }
         }
-        sorted.sort(
-            Comparator.comparing(
-                Order::getPrice,
-                Comparator.nullsLast(Comparator.reverseOrder())
-            ).thenComparing(
-                Order::getCreatedAt,
-                Comparator.nullsLast(Comparator.naturalOrder())
-            ).thenComparingInt(Order::getId)
-        );
+        sorted.sort(MarketListingLayout::compareBuyOrders);
         return sorted;
+    }
+
+    public static int compareBuyOrders(Order left, Order right) {
+        if (left == right) {
+            return 0;
+        }
+        if (left == null) {
+            return 1;
+        }
+        if (right == null) {
+            return -1;
+        }
+        return Comparator.comparing(
+            Order::getPrice,
+            Comparator.nullsLast(Comparator.reverseOrder())
+        ).thenComparing(
+            Order::getCreatedAt,
+            Comparator.nullsLast(Comparator.naturalOrder())
+        ).thenComparingInt(Order::getId).compare(left, right);
     }
 
     public static int pageCount(List<Slot> slots, int pageSize) {
