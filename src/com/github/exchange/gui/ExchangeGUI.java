@@ -1680,7 +1680,7 @@ implements Listener {
             }
             ExchangeItem item = plugin.getItemManager().getItem(trade.getItemId());
             String itemName = ExchangeGUI.resolveHistoryItemName(item, trade.getItemId());
-            boolean isBuy = trade.getBuyerUuid().equals(player.getUniqueId().toString());
+            boolean isBuy = player.getUniqueId().toString().equalsIgnoreCase(trade.getBuyerUuid());
             String role = isBuy ? "\u00a7e\u4e70\u5165\u8bb0\u5f55" : "\u00a7a\u5356\u51fa\u8bb0\u5f55";
             BigDecimal fee = isBuy ? trade.getBuyerFee() : trade.getSellerFee();
             ItemStack tradeItem = ExchangeGUI.createHistoryIcon(
@@ -1689,6 +1689,8 @@ implements Listener {
                 !isBuy,
                 role + " #" + trade.getId() + " \u00a77| \u00a7f" + itemName,
                 "\u00a77\u54c1\u79cd: \u00a7f" + itemName,
+                "\u00a77\u4e70\u5bb6: \u00a7f" + ExchangeGUI.resolveTradeParticipantName(player, trade.getBuyerUuid()),
+                "\u00a77\u5356\u5bb6: \u00a7f" + ExchangeGUI.resolveTradeParticipantName(player, trade.getSellerUuid()),
                 "\u00a77\u5355\u4ef7: \u00a7f" + ExchangeGUI.formatPrice(trade.getPrice()),
                 "\u00a77\u6570\u91cf: \u00a7f" + trade.getQuantity(),
                 "\u00a77\u603b\u989d: \u00a7f" + ExchangeGUI.formatPrice(trade.getTotalAmount()),
@@ -2607,6 +2609,24 @@ implements Listener {
         }
         ItemStack baseItem = ItemSerializer.itemFromBase64(item.getItemBase64());
         return baseItem == null ? item.getDisplayName() : ExchangeGUI.resolveDisplayName(item, baseItem);
+    }
+
+    private static String resolveTradeParticipantName(Player viewer, String participantUuid) {
+        String viewerUuid = viewer.getUniqueId().toString();
+        if (TradeParticipantDisplay.isViewer(viewerUuid, participantUuid)) {
+            return TradeParticipantDisplay.format(viewerUuid, participantUuid, null);
+        }
+        String participantName = null;
+        if (participantUuid != null && !participantUuid.isBlank()) {
+            try {
+                org.bukkit.OfflinePlayer offlinePlayer = Bukkit.getOfflinePlayer(UUID.fromString(participantUuid));
+                if (offlinePlayer != null && offlinePlayer.getName() != null && !offlinePlayer.getName().isBlank()) {
+                    participantName = offlinePlayer.getName();
+                }
+            } catch (IllegalArgumentException ignored) {
+            }
+        }
+        return TradeParticipantDisplay.format(viewerUuid, participantUuid, participantName);
     }
 
     private static void setDisplayAmount(ItemStack item, int quantity) {
