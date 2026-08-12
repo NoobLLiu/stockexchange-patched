@@ -278,7 +278,118 @@ implements Listener {
             return;
         }
         ExchangeGUI.readMarketPage(plugin, player);
-        ExchangeGUI.openCategoryList(plugin, player, page);
+        if (ExchangeGUI.isBuyPage(plugin, player)) {
+            ExchangeGUI.openBuyOrderList(plugin, player, page);
+        } else {
+            ExchangeGUI.openCategoryList(plugin, player, page);
+        }
+    }
+
+    private static void openBuyOrderList(StockExchangePlugin plugin, Player player, int page) {
+        String query = guiSearchQueries.get(player.getUniqueId());
+        List<MarketListingLayout.Slot> listingSlots = ExchangeGUI.collectBuyOrderSlots(plugin, query);
+        String title = "\u00a76\u4ea4\u6613\u5e02\u573a - \u6c42\u8d2d\u5546\u54c1"
+            + (query == null ? "" : " - \u641c\u7d22\u7ed3\u679c");
+        Inventory inv = Bukkit.createInventory(null, 54, title);
+        int pageSize = 35;
+        int totalPages = MarketListingLayout.pageCount(listingSlots, pageSize);
+        int currentPage = Math.max(1, Math.min(page, totalPages));
+        int start = (currentPage - 1) * pageSize;
+        int end = Math.min(start + pageSize, listingSlots.size());
+        int slot = 0;
+        for (int index = start; index < end; ++index) {
+            MarketListingLayout.Slot listingSlot = listingSlots.get(index);
+            Order buyOrder = listingSlot.order();
+            ExchangeItem item = plugin.getItemManager().getItem(buyOrder.getItemId());
+            if (item == null) {
+                continue;
+            }
+            ItemStack baseItem = ItemSerializer.itemFromBase64(item.getItemBase64());
+            if (baseItem == null) {
+                continue;
+            }
+            String itemDisplayName = ExchangeGUI.resolveDisplayName(item, baseItem);
+            int displayedQuantity = listingSlot.amount();
+            ItemStack displayItem = ExchangeGUI.createMarketVoucher(baseItem, itemDisplayName);
+            ExchangeGUI.setDisplayAmount(displayItem, displayedQuantity);
+            ItemMeta meta = displayItem.getItemMeta();
+            if (meta != null) {
+                ArrayList<String> lore = new ArrayList<String>();
+                lore.add("\u00a77\u7269\u54c1: \u00a7f" + itemDisplayName);
+                lore.add("\u00a77\u4e70\u5bb6: \u00a7f" + safeText(buyOrder.getPlayerName(), "\u672a\u77e5\u73a9\u5bb6"));
+                lore.add("\u00a77\u6c42\u8d2d\u4ef7: " + ExchangeGUI.formatHighlightedPrice(buyOrder.getPrice()));
+                lore.add("\u00a77\u8fd9\u683c\u6570\u91cf: \u00a7f" + displayedQuantity);
+                lore.add("\u00a77\u8be5\u6c42\u8d2d\u5355\u5269\u4f59: \u00a7f" + buyOrder.getRemainingQty());
+                lore.add("");
+                boolean ownOrder = buyOrder.getPlayerUuid().equals(player.getUniqueId().toString());
+                if (ownOrder) {
+                    meta.setEnchantmentGlintOverride(true);
+                    lore.add("\u00a7e\u5de6\u952e: \u51cf\u5c11 1 \u4e2a\u6c42\u8d2d");
+                    lore.add("\u00a7eShift+\u5de6\u952e: \u53d6\u6d88\u672c\u683c\u5168\u90e8\u6c42\u8d2d");
+                } else {
+                    lore.add("\u00a7e\u5de6\u952e: \u4f9b\u8d27 1 \u4e2a");
+                    lore.add("\u00a7eShift+\u5de6\u952e: \u4f9b\u8d27\u672c\u683c " + displayedQuantity
+                        + " \u4e2a\uff08\u80cc\u5305\u4e0d\u8db3\u5219\u4f9b\u8d27\u73b0\u6709\u6570\u91cf\uff09");
+                }
+                lore.add("\u00a70ORDER:" + buyOrder.getId());
+                meta.setLore(lore);
+                displayItem.setItemMeta(meta);
+            }
+            inv.setItem(slot++, displayItem);
+        }
+        if (listingSlots.isEmpty()) {
+            inv.setItem(22, ExchangeGUI.createItem(
+                Material.BARRIER,
+                "\u00a7c\u6682\u65e0\u6c42\u8d2d\u4e2d\u7684\u5546\u54c1",
+                query == null
+                    ? "\u00a77\u5f53\u524d\u6ca1\u6709\u6d3b\u52a8\u6c42\u8d2d\u5355"
+                    : "\u00a77\u641c\u7d22\u5173\u952e\u8bcd: \u00a7f" + ExchangeGUI.safeQueryForDisplay(query)
+            ));
+        }
+        if (slot <= 35) {
+            inv.setItem(35, ExchangeGUI.createItem(
+                Material.EMERALD,
+                "\u00a7c\u6c42\u8d2d\u7269\u54c1",
+                "\u00a77\u9009\u62e9\u7269\u54c1\u5e76\u53d1\u5e03\u6c42\u8d2d\u5355",
+                "\u00a77\u4e0d\u4f1a\u6d88\u8017\u80cc\u5305\u7269\u54c1"
+            ));
+        }
+        ItemStack separator = ExchangeGUI.createItem(
+            new ItemStack(Material.ORANGE_STAINED_GLASS_PANE),
+            "\u00a77",
+            new String[]{null}
+        );
+        for (int separatorSlot = 36; separatorSlot <= ITEM_LIST_SEPARATOR_SLOT; ++separatorSlot) {
+            inv.setItem(separatorSlot, separator);
+        }
+        ExchangeGUI.populateMarketFooter(plugin, player, inv, currentPage, totalPages);
+        ExchangeGUI.finishOpeningItemList(player, inv, currentPage);
+    }
+
+    private static List<MarketListingLayout.Slot> collectBuyOrderSlots(
+        StockExchangePlugin plugin,
+        String query
+    ) {
+        List<Order> buyOrders = new ArrayList<Order>();
+        for (ExchangeItem item : plugin.getItemManager().getAllItems()) {
+            if (item == null || (query != null && !ExchangeGUI.matchesCatalogSearch(plugin, item, query))) {
+                continue;
+            }
+            buyOrders.addAll(plugin.getOrderManager().getActiveOrders(item.getId(), Order.OrderType.BUY));
+        }
+        List<MarketListingLayout.Slot> slots = new ArrayList<MarketListingLayout.Slot>();
+        for (Order buyOrder : MarketListingLayout.sortBuyOrders(buyOrders)) {
+            ExchangeItem item = plugin.getItemManager().getItem(buyOrder.getItemId());
+            if (item == null) {
+                continue;
+            }
+            ItemStack baseItem = ItemSerializer.itemFromBase64(item.getItemBase64());
+            if (baseItem == null) {
+                continue;
+            }
+            slots.addAll(MarketListingLayout.expand(buyOrder, baseItem.getMaxStackSize()));
+        }
+        return slots;
     }
 
     private static void openCategoryList(StockExchangePlugin plugin, Player player, int page) {
@@ -502,7 +613,7 @@ implements Listener {
             return;
         }
         guiSearchQueries.put(player.getUniqueId(), trimmedQuery);
-        ExchangeGUI.openCategoryList(plugin, player, page);
+        ExchangeGUI.openItemList(plugin, player, page);
     }
 
     private static void populateMarketFooter(
@@ -1611,6 +1722,55 @@ implements Listener {
                     clicker.performCommand("menu");
                     break;
                 }
+                Integer buyOrderId = ExchangeGUI.readOrderId(meta);
+                if (buyOrderId != null && ExchangeGUI.isBuyPage(plugin, clicker)) {
+                    Order buyOrder = plugin.getOrderManager().getOrder(buyOrderId);
+                    if (buyOrder == null || buyOrder.getOrderType() != Order.OrderType.BUY || !buyOrder.isActive()) {
+                        plugin.getTradeNoticeBuffer().manual(clicker, "\u00a7c\u8be5\u6c42\u8d2d\u5355\u5df2\u4e0d\u53ef\u7528\u3002");
+                        guiNavigating.put(uuid, true);
+                        ExchangeGUI.openItemList(plugin, clicker, guiPage.getOrDefault(uuid, 1));
+                        break;
+                    }
+                    if (buyOrder.getPlayerUuid().equals(clicker.getUniqueId().toString())) {
+                        if (event.getClick() == ClickType.LEFT) {
+                            plugin.getTradeNoticeBuffer().manual(clicker,
+                                plugin.getOrderManager().withdrawOrderQuantity(clicker, buyOrderId, 1));
+                        } else if (event.getClick() == ClickType.SHIFT_LEFT) {
+                            plugin.getTradeNoticeBuffer().manual(clicker,
+                                plugin.getOrderManager().withdrawOrderQuantity(
+                                    clicker,
+                                    buyOrderId,
+                                    ExchangeGUI.readDisplayedQuantity(meta)
+                                ));
+                        } else {
+                            break;
+                        }
+                    } else {
+                        int quantity;
+                        if (event.getClick() == ClickType.LEFT) {
+                            quantity = 1;
+                        } else if (event.getClick() == ClickType.SHIFT_LEFT) {
+                            ExchangeItem supplyItem = plugin.getItemManager().getItem(buyOrder.getItemId());
+                            int available = supplyItem == null
+                                ? 0
+                                : plugin.getOrderManager().getSupplyPlan(clicker, supplyItem).availableQuantity();
+                            quantity = Math.min(available, ExchangeGUI.readDisplayedQuantity(meta));
+                            if (quantity <= 0) {
+                                plugin.getTradeNoticeBuffer().manual(clicker,
+                                    "\u00a7c\u80cc\u5305\u4e2d\u6ca1\u6709\u53ef\u4f9b\u8d27\u7684\u7269\u54c1\u3002");
+                            }
+                        } else {
+                            break;
+                        }
+                        if (quantity > 0) {
+                            plugin.getTradeNoticeBuffer().manual(clicker,
+                                plugin.getOrderManager().directSellToBuyOrder(clicker, buyOrderId, quantity));
+                        }
+                    }
+                    guiNavigating.put(uuid, true);
+                    ExchangeGUI.openItemList(plugin, clicker, guiPage.getOrDefault(uuid, 1));
+                    break;
+                }
                 Integer categoryItemId = meta.getPersistentDataContainer().get(
                     ExchangeGUI.categoryItemIdKey(plugin),
                     PersistentDataType.INTEGER
@@ -2202,6 +2362,23 @@ implements Listener {
         }
         int maxStackSize = Math.max(1, Math.min(MarketListingLayout.MAX_DISPLAY_AMOUNT, item.getMaxStackSize()));
         item.setAmount(Math.max(1, Math.min(maxStackSize, quantity)));
+    }
+
+    private static Integer readOrderId(ItemMeta meta) {
+        if (meta == null || meta.getLore() == null) {
+            return null;
+        }
+        for (String line : meta.getLore()) {
+            if (line == null || !line.startsWith("\u00a70ORDER:")) {
+                continue;
+            }
+            try {
+                return Integer.parseInt(line.substring("\u00a70ORDER:".length()));
+            } catch (NumberFormatException ignored) {
+                return null;
+            }
+        }
+        return null;
     }
 
     private static String shortUuid(String uuid) {
