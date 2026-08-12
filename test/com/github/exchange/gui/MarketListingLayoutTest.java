@@ -1,7 +1,6 @@
 package com.github.exchange.gui;
 
 import com.github.exchange.model.Order;
-import com.github.exchange.util.SpecialCategory;
 import java.math.BigDecimal;
 import java.sql.Timestamp;
 import java.util.ArrayList;
@@ -51,12 +50,6 @@ public final class MarketListingLayoutTest {
             && splitOrder.stream().mapToInt(MarketListingLayout.Slot::amount).sum() == 130
             : "a BUY order must retain its order identity while splitting into valid display stacks";
 
-        int priorityCmp = SpecialCategory.compareMarketPagePriority(
-            SpecialCategory.MUSIC_DISC,
-            null
-        );
-        assert priorityCmp < 0
-            : "a special-category BUY order must remain above a higher-priced ordinary BUY order";
     }
 
     private static Order order(int id, int quantity, int filledQty) {

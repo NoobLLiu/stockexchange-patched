@@ -370,30 +370,15 @@ implements Listener {
         StockExchangePlugin plugin,
         String query
     ) {
-        plugin.getItemManager().ensureSpecialCategories();
         List<Order> buyOrders = new ArrayList<Order>();
-        Map<Integer, SpecialCategory> specialCategories = new HashMap<Integer, SpecialCategory>();
         for (ExchangeItem item : plugin.getItemManager().getAllItems()) {
-            if (item == null) {
-                continue;
-            }
-            SpecialCategory category = plugin.getItemManager().getSpecialCategory(item);
-            if (category != null) {
-                specialCategories.put(item.getId(), category);
-            } else if (query != null && !ExchangeGUI.matchesCatalogSearch(plugin, item, query)) {
+            if (item == null || (query != null && !ExchangeGUI.matchesCatalogSearch(plugin, item, query))) {
                 continue;
             }
             buyOrders.addAll(plugin.getOrderManager().getActiveOrders(item.getId(), Order.OrderType.BUY));
         }
         List<MarketListingLayout.Slot> slots = new ArrayList<MarketListingLayout.Slot>();
-        buyOrders.sort((a, b) -> {
-            int categoryCmp = SpecialCategory.compareMarketPagePriority(
-                specialCategories.get(a.getItemId()),
-                specialCategories.get(b.getItemId())
-            );
-            return categoryCmp != 0 ? categoryCmp : MarketListingLayout.compareBuyOrders(a, b);
-        });
-        for (Order buyOrder : buyOrders) {
+        for (Order buyOrder : MarketListingLayout.sortBuyOrders(buyOrders)) {
             ExchangeItem item = plugin.getItemManager().getItem(buyOrder.getItemId());
             if (item == null) {
                 continue;
