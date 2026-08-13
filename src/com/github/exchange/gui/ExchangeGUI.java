@@ -79,6 +79,7 @@ implements Listener {
     private static final Map<UUID, Boolean> guiNavigating = new HashMap<UUID, Boolean>();
     private static final Map<UUID, Boolean> bulkBuyMode = new HashMap<UUID, Boolean>();
     private static final Map<UUID, Boolean> buyMode = new HashMap<UUID, Boolean>();
+    private static final Map<UUID, HistoryView> guiHistoryViews = new HashMap<UUID, HistoryView>();
     private static final Map<UUID, Map<Integer, String>> guiWarehouseEntries = new HashMap<UUID, Map<Integer, String>>();
     private static final Map<UUID, String> guiSearchQueries = new HashMap<UUID, String>();
     private static final Map<UUID, Map<String, Integer>> listingPending = new HashMap<UUID, Map<String, Integer>>();
@@ -1666,23 +1667,41 @@ implements Listener {
         if (plugin.denyGrowthAccess(player)) {
             return;
         }
+        guiHistoryViews.put(player.getUniqueId(), HistoryView.SELL_ORDERS);
         ExchangeGUI.openMyHistory(plugin, player, 1);
     }
 
     private static void openMyHistory(StockExchangePlugin plugin, Player player, int page) {
         List<Order> orders = plugin.getOrderManager().getPlayerOrders(player.getUniqueId().toString());
         List<Trade> trades = plugin.getStorageManager().getTradesByPlayer(player.getUniqueId().toString(), 200, 0);
+        HistoryView historyView = guiHistoryViews.getOrDefault(player.getUniqueId(), HistoryView.SELL_ORDERS);
+        List<Order> displayedOrders = new ArrayList<Order>();
+        List<Trade> displayedTrades = new ArrayList<Trade>();
+        for (Order order : orders) {
+            if (historyView.accepts(order)) {
+                displayedOrders.add(order);
+            }
+        }
+        for (Trade trade : trades) {
+            if (historyView.accepts(player.getUniqueId().toString(), trade)) {
+                displayedTrades.add(trade);
+            }
+        }
         int size = 54;
-        Inventory inv = Bukkit.createInventory(null, (int)size, (String)"\u00a76\u6211\u7684\u4ea4\u6613\u8bb0\u5f55");
+        Inventory inv = Bukkit.createInventory(
+            null,
+            (int)size,
+            (String)"\u00a76\u6211\u7684\u4ea4\u6613\u8bb0\u5f55 - " + historyView.getDisplayName()
+        );
         int pageSize = size - 9;
-        int totalEntries = orders.size() + trades.size();
+        int totalEntries = displayedOrders.size() + displayedTrades.size();
         int totalPages = Math.max(1, (totalEntries + pageSize - 1) / pageSize);
         int currentPage = Math.max(1, Math.min(page, totalPages));
         int start = (currentPage - 1) * pageSize;
         int end = Math.min(start + pageSize, totalEntries);
         int index = 0;
         int slot = 0;
-        for (Order order : orders) {
+        for (Order order : displayedOrders) {
             if (index >= end) {
                 break;
             }
@@ -1707,7 +1726,7 @@ implements Listener {
             }
             ++index;
         }
-        for (Trade trade : trades) {
+        for (Trade trade : displayedTrades) {
             if (index >= end) {
                 break;
             }
@@ -1737,11 +1756,25 @@ implements Listener {
             inv.setItem(slot++, tradeItem);
             ++index;
         }
-        int navBase = size - 9;
+        if (totalEntries == 0) {
+            inv.setItem(22, ExchangeGUI.createItem(
+                Material.BARRIER,
+                "\u00a77\u6682\u65e0" + ChatColor.stripColor(historyView.getDisplayName()),
+                "\u00a77\u70b9\u51fb\u5e95\u90e8\u7684\u300c\u5207\u6362\u8bb0\u5f55\u300d\u67e5\u770b\u5176\u4ed6\u5206\u7c7b"
+            ));
+        }
         inv.setItem(LARGE_PREV_SLOT, ExchangeGUI.navigationItem(
             PAGE_PREV,
             currentPage > 1,
             "\u00a77\u7b2c " + currentPage + "/" + totalPages + " \u9875"
+        ));
+        HistoryView nextHistoryView = historyView.next();
+        inv.setItem(49, ExchangeGUI.createItemWithModelData(
+            Material.BOOK,
+            "\u00a7b\u5207\u6362\u8bb0\u5f55",
+            2400047,
+            "\u00a77\u5f53\u524d\uff1a" + historyView.getDisplayName(),
+            "\u00a7e\u70b9\u51fb\u5207\u6362\u5230\uff1a" + nextHistoryView.getDisplayName()
         ));
         ItemStack backItem = ExchangeGUI.createItem(Material.ARROW, BACK_TO_PREVIOUS, "\u00a77\u8fd4\u56de\u4e3b\u83dc\u5355");
         inv.setItem(LARGE_BACK_SLOT, backItem);
@@ -2279,6 +2312,12 @@ implements Listener {
                 break;
             }
             case "my_history": {
+                if (event.getRawSlot() == 49 && rawSlotIsTopInventory(event, 54)) {
+                    guiHistoryViews.put(uuid, guiHistoryViews.getOrDefault(uuid, HistoryView.SELL_ORDERS).next());
+                    guiNavigating.put(uuid, true);
+                    ExchangeGUI.openMyHistory(plugin, clicker, 1);
+                    break;
+                }
                 if (displayName.contains(PAGE_PREV)) {
                     if (isDisabledNavigation(meta, 2400061)) break;
                     guiNavigating.put(uuid, true);
@@ -2465,6 +2504,7 @@ implements Listener {
         guiItemId.remove(uuid);
         guiPage.remove(uuid);
         guiDetailPage.remove(uuid);
+        guiHistoryViews.remove(uuid);
         bulkBuyMode.remove(uuid);
         guiWarehouseEntries.remove(uuid);
         guiSearchQueries.remove(uuid);
@@ -2486,6 +2526,7 @@ implements Listener {
         guiPage.remove(uuid);
         guiDetailPage.remove(uuid);
         guiNavigating.remove(uuid);
+        guiHistoryViews.remove(uuid);
         bulkBuyMode.remove(uuid);
         buyMode.remove(uuid);
         guiWarehouseEntries.remove(uuid);
@@ -2810,6 +2851,40 @@ implements Listener {
         BigDecimal changePercent = BigDecimal.ZERO;
 
         private MarketSnapshot() {
+        }
+    }
+
+    static enum HistoryView {
+        SELL_ORDERS("\u00a7a\u51fa\u552e\u6302\u5355"),
+        BUY_ORDERS("\u00a7e\u6c42\u8d2d\u6302\u5355"),
+        BUY_TRADES("\u00a7e\u4e70\u5165\u8bb0\u5f55"),
+        SELL_TRADES("\u00a7a\u5356\u51fa\u8bb0\u5f55");
+
+        private final String displayName;
+
+        private HistoryView(String displayName) {
+            this.displayName = displayName;
+        }
+
+        String getDisplayName() {
+            return this.displayName;
+        }
+
+        HistoryView next() {
+            HistoryView[] views = HistoryView.values();
+            return views[(this.ordinal() + 1) % views.length];
+        }
+
+        boolean accepts(Order order) {
+            return order != null
+                && ((this == SELL_ORDERS && order.getOrderType() == Order.OrderType.SELL)
+                    || (this == BUY_ORDERS && order.getOrderType() == Order.OrderType.BUY));
+        }
+
+        boolean accepts(String playerUuid, Trade trade) {
+            return trade != null
+                && ((this == BUY_TRADES && playerUuid.equalsIgnoreCase(trade.getBuyerUuid()))
+                    || (this == SELL_TRADES && playerUuid.equalsIgnoreCase(trade.getSellerUuid())));
         }
     }
 }
