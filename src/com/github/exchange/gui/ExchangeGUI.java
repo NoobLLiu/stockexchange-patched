@@ -982,6 +982,13 @@ implements Listener {
             "\u00a77\u7a0e\u989d: \u00a7f" + tax.toPlainString() + " \u00a78(" + plugin.getTaxRatePercent().toPlainString() + "%)",
             "\u00a77\u6bcf\u70b9\u51fb\u4e00\u6b21\u6267\u884c\u4e00\u6b21"
         ));
+        inv.setItem(13, ExchangeGUI.createItem(
+            Material.DIAMOND_BLOCK,
+            "\u00a7a\u4e00\u952e\u5151\u6362",
+            "\u00a77\u5c06\u80cc\u5305\u4e2d\u6240\u6709\u94bb\u77f3\u548c\u94bb\u77f3\u5757\u5151\u6362\u6210\u661f\u5149\u70b9",
+            "\u00a77\u4e00\u4e2a\u94bb\u77f3\u5757 = 9 \u94bb\u77f3",
+            "\u00a77\u5151\u6362\u7a0e\u7387: \u00a7f" + plugin.getTaxRatePercent().toPlainString() + "%"
+        ));
         inv.setItem(SMALL_BACK_SLOT, ExchangeGUI.createItem(Material.ARROW, BACK_TO_PREVIOUS, "\u00a77\u8fd4\u56de\u4e3b\u83dc\u5355"));
         guiState.put(player.getUniqueId(), CURRENCY_EXCHANGE);
         guiItemId.remove(player.getUniqueId());
@@ -1357,6 +1364,7 @@ implements Listener {
             .title("\u8d27\u5e01\u5151\u6362")
             .content("\u5f53\u524d\u7a0e\u7387: " + plugin.getTaxRatePercent().toPlainString() + "%\n\u6bcf\u6b21\u5151\u6362\u7a0e\u989d: " + tax.toPlainString() + " " + plugin.getCurrencyName())
             .button("1 \u94bb\u77f3 -> " + received.toPlainString() + " " + plugin.getCurrencyName())
+            .button("\u00a7a\u4e00\u952e\u5151\u6362\n\u00a77\u80cc\u5305\u6240\u6709\u94bb\u77f3\u548c\u94bb\u77f3\u5757")
             .button(totalCost.toPlainString() + " " + plugin.getCurrencyName() + " -> 1 \u94bb\u77f3")
             .button("\u8fd4\u56de")
             .validResultHandler(response -> Bukkit.getScheduler().runTask(plugin, () -> {
@@ -1365,6 +1373,9 @@ implements Listener {
                     player.sendMessage(plugin.exchangeDiamondForMoney(player));
                     openBedrockCurrencyExchangeForm(plugin, player);
                 } else if (index == 1) {
+                    player.sendMessage(plugin.exchangeAllDiamondsForMoney(player));
+                    openBedrockCurrencyExchangeForm(plugin, player);
+                } else if (index == 2) {
                     player.sendMessage(plugin.exchangeMoneyForDiamond(player));
                     openBedrockCurrencyExchangeForm(plugin, player);
                 } else {
@@ -2358,6 +2369,10 @@ implements Listener {
                 break;
             }
             case "currency_exchange": {
+                if (displayName.contains("\u4e00\u952e\u5151\u6362")) {
+                    clicker.sendMessage(plugin.exchangeAllDiamondsForMoney(clicker));
+                    break;
+                }
                 if (displayName.contains("\u5151\u6362 1 \u94bb\u77f3") && !displayName.contains("\u4f7f\u7528 1 \u94bb\u77f3")) {
                     clicker.sendMessage(plugin.exchangeMoneyForDiamond(clicker));
                     break;

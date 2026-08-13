@@ -577,6 +577,52 @@ extends JavaPlugin {
             + this.taxRatePercent.toPlainString() + "%\uff09";
     }
 
+    public String exchangeAllDiamondsForMoney(Player player) {
+        if (player == null) {
+            return "\u00a7c\u53ea\u6709\u73a9\u5bb6\u53ef\u4ee5\u8fdb\u884c\u5151\u6362\u3002";
+        }
+        if (this.isGrowthAccessRestricted(player)) {
+            return this.growthAccessMessage(player);
+        }
+        Material diamondMat = this.diamondMaterial;
+        Material blockMat = Material.DIAMOND_BLOCK;
+        int totalDiamonds = 0;
+        ItemStack[] contents = player.getInventory().getContents();
+        for (int i = 0; i < contents.length; ++i) {
+            ItemStack stack = contents[i];
+            if (stack == null) continue;
+            if (stack.getType() == diamondMat) {
+                totalDiamonds += stack.getAmount();
+            } else if (stack.getType() == blockMat) {
+                totalDiamonds += stack.getAmount() * 9;
+            }
+        }
+        if (totalDiamonds <= 0) {
+            return "\u00a7c\u80cc\u5305\u4e2d\u6ca1\u6709\u53ef\u7528\u4e8e\u5151\u6362\u7684\u94bb\u77f3\u6216\u94bb\u77f3\u5757\u3002";
+        }
+        BigDecimal perDiamondReceived = TaxCalculator.afterTax(this.diamondToMoneyAmount, this.taxRatePercent);
+        BigDecimal perDiamondTax = TaxCalculator.tax(this.diamondToMoneyAmount, this.taxRatePercent);
+        BigDecimal totalReceived = perDiamondReceived.multiply(BigDecimal.valueOf(totalDiamonds));
+        BigDecimal totalTax = perDiamondTax.multiply(BigDecimal.valueOf(totalDiamonds));
+        for (int i = 0; i < contents.length; ++i) {
+            ItemStack stack = contents[i];
+            if (stack == null) continue;
+            if (stack.getType() == diamondMat || stack.getType() == blockMat) {
+                contents[i] = null;
+            }
+        }
+        player.getInventory().setContents(contents);
+        if (totalReceived.compareTo(BigDecimal.ZERO) > 0 && !EconomyUtil.deposit(player.getUniqueId(), totalReceived)) {
+            this.getLogger().severe("[AssetAudit] BULK_DIAMOND_DEPOSIT_FAILED player=" + player.getUniqueId() + " diamonds=" + totalDiamonds);
+            return "\u00a7c\u5165\u8d26\u5931\u8d25\uff0c\u94bb\u77f3\u5df2\u88ab\u6d88\u8017\uff0c\u8bf7\u7acb\u5373\u8054\u7cfb\u7ba1\u7406\u5458\u3002";
+        }
+        this.collectTax(totalTax);
+        return "\u00a7a\u4e00\u952e\u5151\u6362\u6210\u529f\uff1a" + totalDiamonds + " \u94bb\u77f3 -> "
+            + totalReceived.toPlainString() + " " + this.currencyName
+            + "\u00a77\uff08\u7a0e\u989d " + totalTax.toPlainString() + "\uff0c\u7a0e\u7387 "
+            + this.taxRatePercent.toPlainString() + "%\uff09";
+    }
+
     public String exchangeMoneyForDiamond(Player player) {
         if (player == null) {
             return "\u00a7c\u53ea\u6709\u73a9\u5bb6\u53ef\u4ee5\u8fdb\u884c\u5151\u6362\u3002";
