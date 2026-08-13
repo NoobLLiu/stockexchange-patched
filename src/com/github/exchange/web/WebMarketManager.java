@@ -93,7 +93,8 @@ public class WebMarketManager {
         Order.OrderType pageOrderType = buyPage ? Order.OrderType.BUY : Order.OrderType.SELL;
         Map<Integer, Long> activeQuantities = new HashMap<Integer, Long>();
         Map<Integer, Long> latestOrderCreatedAt = new HashMap<Integer, Long>();
-        Map<Integer, BigDecimal> activeSellMarketValues = new HashMap<Integer, BigDecimal>();
+        Map<Integer, MarketPageFilter.SellCatalogMetrics> sellCatalogMetrics =
+            new HashMap<Integer, MarketPageFilter.SellCatalogMetrics>();
         items.removeIf(item -> {
             SpecialCategory category = plugin.getItemManager().getSpecialCategory(item);
             if (category != null) {
@@ -107,9 +108,17 @@ public class WebMarketManager {
                     plugin.getStorageManager().getLatestOrderCreatedAt(item.getId(), pageOrderType)
                 );
                 if (!buyPage) {
-                    activeSellMarketValues.put(
+                    sellCatalogMetrics.put(
                         item.getId(),
-                        MarketPageFilter.activeSellMarketValue(activeOrders)
+                        MarketPageFilter.createSellCatalogMetrics(
+                            activeOrders,
+                            plugin.getStorageManager().getTradesByItem(
+                                item.getId(),
+                                MarketPageFilter.SELL_CATALOG_TRADE_SAMPLE_LIMIT
+                            ),
+                            now,
+                            latestOrderCreatedAt.getOrDefault(item.getId(), 0L)
+                        )
                     );
                 }
                 return false;
@@ -124,9 +133,17 @@ public class WebMarketManager {
             activeQuantities.put(item.getId(), activeQuantity);
             latestOrderCreatedAt.put(item.getId(), latestOrderAt);
             if (!buyPage) {
-                activeSellMarketValues.put(
+                sellCatalogMetrics.put(
                     item.getId(),
-                    MarketPageFilter.activeSellMarketValue(activeOrders)
+                    MarketPageFilter.createSellCatalogMetrics(
+                        activeOrders,
+                        plugin.getStorageManager().getTradesByItem(
+                            item.getId(),
+                            MarketPageFilter.SELL_CATALOG_TRADE_SAMPLE_LIMIT
+                        ),
+                        now,
+                        latestOrderAt
+                    )
                 );
             }
             if (!buyPage) {
@@ -149,6 +166,17 @@ public class WebMarketManager {
                 explicitSearch
             );
         });
+        if (!buyPage) {
+            List<MarketPageFilter.SellCatalogMetrics> visibleMetrics =
+                new ArrayList<MarketPageFilter.SellCatalogMetrics>();
+            for (ExchangeItem item : items) {
+                MarketPageFilter.SellCatalogMetrics metrics = sellCatalogMetrics.get(item.getId());
+                if (metrics != null) {
+                    visibleMetrics.add(metrics);
+                }
+            }
+            MarketPageFilter.calculateSellCatalogScores(visibleMetrics);
+        }
         if (buyPage) {
             items.sort((a, b) -> {
                 int cmp = Long.compare(
@@ -169,11 +197,9 @@ public class WebMarketManager {
             });
         } else {
             items.sort((a, b) -> MarketPageFilter.compareSellCatalogEntries(
-                    activeSellMarketValues.get(a.getId()),
-                    latestOrderCreatedAt.getOrDefault(a.getId(), 0L),
+                    sellCatalogMetrics.get(a.getId()),
                     a.getId(),
-                    activeSellMarketValues.get(b.getId()),
-                    latestOrderCreatedAt.getOrDefault(b.getId(), 0L),
+                    sellCatalogMetrics.get(b.getId()),
                     b.getId()
                 )
             );
