@@ -1177,7 +1177,7 @@ implements Listener {
                     player, categoryItem, entry.getKey(), price, chunk
                 );
                 if (result.startsWith("\u00a7c")) {
-                    player.sendMessage(result);
+                    plugin.getTradeNoticeBuffer().manual(player, result);
                     break;
                 }
                 listed += chunk;
@@ -1189,10 +1189,7 @@ implements Listener {
         if (!remaining.isEmpty()) {
             ExchangeGUI.returnListingItems(player, remaining);
         }
-        if (listed > 0) {
-            plugin.getTradeNoticeBuffer().manual(player, "\u00a7a\u4e0a\u67b6\u5b8c\u6210\uff1a\u5171 " + listed
-                + " \u4e2a\u7269\u54c1\u4ee5\u5355\u4ef7 " + price + " \u4e0a\u67b6\u3002");
-        } else {
+        if (listed <= 0) {
             plugin.getTradeNoticeBuffer().manual(player, "\u00a7c\u6ca1\u6709\u4efb\u4f55\u7269\u54c1\u4e0a\u67b6\u6210\u529f\u3002");
         }
         ExchangeGUI.openItemList(plugin, player);

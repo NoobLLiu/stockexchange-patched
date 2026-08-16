@@ -126,6 +126,7 @@ extends JavaPlugin {
         this.itemManager.normalizeCatalogDisplayNames();
         this.itemManager.ensureSpecialCategories();
         this.orderManager = new OrderManager(this);
+        this.itemManager.mergeNameOnlyCatalogAliases();
         this.tradeManager = new TradeManager(this);
         this.escrowManager = new EscrowManager(this);
         this.sellBuyerTracker = new SellBuyerTracker(
@@ -450,6 +451,26 @@ extends JavaPlugin {
                 this.getLogger().warning("Failed to deposit tax " + amount.toPlainString() + " to system account.");
             }
             return deposited;
+        } catch (IllegalArgumentException ex) {
+            this.getLogger().warning("Invalid tax.system_account UUID: " + this.systemAccount);
+            return false;
+        }
+    }
+
+    public boolean refundCollectedTax(BigDecimal amount) {
+        if (amount == null || amount.compareTo(BigDecimal.ZERO) <= 0) {
+            return true;
+        }
+        if (this.systemAccount == null || this.systemAccount.isBlank()) {
+            return true;
+        }
+        try {
+            boolean withdrawn = EconomyUtil.withdraw(java.util.UUID.fromString(this.systemAccount), amount);
+            if (!withdrawn) {
+                this.getLogger().warning("Failed to withdraw refunded tax " + amount.toPlainString()
+                    + " from system account.");
+            }
+            return withdrawn;
         } catch (IllegalArgumentException ex) {
             this.getLogger().warning("Invalid tax.system_account UUID: " + this.systemAccount);
             return false;

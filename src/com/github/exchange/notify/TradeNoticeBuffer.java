@@ -6,8 +6,10 @@ import java.io.IOException;
 import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.function.Consumer;
 import org.bukkit.Bukkit;
@@ -30,12 +32,15 @@ public class TradeNoticeBuffer {
     private final StockExchangePlugin plugin;
     private final long manualDelayTicks;
     private final long passiveDelayTicks;
-    private final Map<UUID, List<String>> manualLines = new HashMap<UUID, List<String>>();
+    private final Map<UUID, OperationNoticeAggregator> manualOnline =
+        new HashMap<UUID, OperationNoticeAggregator>();
     private final Map<UUID, PassiveNoticeAggregator> passiveOnline =
         new HashMap<UUID, PassiveNoticeAggregator>();
     private final Map<UUID, PassiveNoticeAggregator> passiveOffline =
         new HashMap<UUID, PassiveNoticeAggregator>();
     private final Map<String, BukkitTask> pendingTasks = new HashMap<String, BukkitTask>();
+    private final Set<String> pendingListingNames = new LinkedHashSet<String>();
+    private BukkitTask pendingListingTask;
     private final File offlineFile;
 
     public TradeNoticeBuffer(StockExchangePlugin plugin) {
@@ -59,9 +64,79 @@ public class TradeNoticeBuffer {
             return;
         }
         synchronized (this) {
-            this.manualLines.computeIfAbsent(uuid, key -> new ArrayList<String>()).add(message);
+            if (isStructuredOperationEcho(message)) {
+                return;
+            }
+            this.manualOnline.computeIfAbsent(
+                uuid, key -> new OperationNoticeAggregator()
+            ).addLegacy(message);
             this.reschedule(uuid, Type.MANUAL);
         }
+    }
+
+    public void purchased(
+        Player player,
+        String itemName,
+        int quantity,
+        BigDecimal gross,
+        BigDecimal tax,
+        BigDecimal charged
+    ) {
+        if (player == null) {
+            return;
+        }
+        synchronized (this) {
+            this.manualOnline.computeIfAbsent(
+                player.getUniqueId(), key -> new OperationNoticeAggregator()
+            ).addPurchase(itemName, quantity, gross, tax, charged);
+            this.reschedule(player.getUniqueId(), Type.MANUAL);
+        }
+    }
+
+    public void sold(
+        Player player,
+        String itemName,
+        int quantity,
+        BigDecimal gross,
+        BigDecimal tax,
+        BigDecimal received
+    ) {
+        if (player == null) {
+            return;
+        }
+        synchronized (this) {
+            this.manualOnline.computeIfAbsent(
+                player.getUniqueId(), key -> new OperationNoticeAggregator()
+            ).addSale(itemName, quantity, gross, tax, received);
+            this.reschedule(player.getUniqueId(), Type.MANUAL);
+        }
+    }
+
+    public void listed(Player player, String itemName, int quantity) {
+        if (player == null) {
+            return;
+        }
+        synchronized (this) {
+            this.manualOnline.computeIfAbsent(
+                player.getUniqueId(), key -> new OperationNoticeAggregator()
+            ).addListing(itemName, quantity);
+            this.reschedule(player.getUniqueId(), Type.MANUAL);
+        }
+    }
+
+    public synchronized void broadcastListing(String itemName) {
+        if (itemName == null || itemName.isBlank()) {
+            return;
+        }
+        this.pendingListingNames.add(itemName);
+        if (this.pendingListingTask != null) {
+            this.pendingListingTask.cancel();
+        }
+        this.pendingListingTask = this.plugin.getServer().getScheduler().runTaskLater(
+            this.plugin,
+            this::flushListingBroadcast,
+            this.manualDelayTicks
+        );
     }
 
     public void passiveSold(UUID sellerUuid, UUID buyerUuid, String itemName, int quantity,
@@ -112,9 +187,13 @@ public class TradeNoticeBuffer {
     private synchronized void flush(UUID uuid, Type type) {
         this.pendingTasks.remove(uuid + ":" + type.name());
         if (type == Type.MANUAL) {
-            List<String> queued = this.manualLines.remove(uuid);
+            OperationNoticeAggregator queued = this.manualOnline.remove(uuid);
             if (queued != null && !queued.isEmpty()) {
-                this.deliverLines(uuid, this.header(type), queued);
+                this.deliverLines(
+                    uuid,
+                    this.header(type),
+                    queued.buildLines(this.plugin.getCurrencyName())
+                );
             }
             return;
         }
@@ -148,11 +227,20 @@ public class TradeNoticeBuffer {
             task.cancel();
         }
         this.pendingTasks.clear();
-        for (Map.Entry<UUID, List<String>> entry : new ArrayList<Map.Entry<UUID, List<String>>>(
-            this.manualLines.entrySet())) {
-            this.manualLines.remove(entry.getKey());
+        if (this.pendingListingTask != null) {
+            this.pendingListingTask.cancel();
+            this.pendingListingTask = null;
+        }
+        this.flushListingBroadcast();
+        for (Map.Entry<UUID, OperationNoticeAggregator> entry :
+            new ArrayList<Map.Entry<UUID, OperationNoticeAggregator>>(this.manualOnline.entrySet())) {
+            this.manualOnline.remove(entry.getKey());
             if (!entry.getValue().isEmpty()) {
-                this.deliverLines(entry.getKey(), this.header(Type.MANUAL), entry.getValue());
+                this.deliverLines(
+                    entry.getKey(),
+                    this.header(Type.MANUAL),
+                    entry.getValue().buildLines(this.plugin.getCurrencyName())
+                );
             }
         }
         for (Map.Entry<UUID, PassiveNoticeAggregator> entry :
@@ -193,12 +281,40 @@ public class TradeNoticeBuffer {
     }
 
     private void sendGrouped(Player player, String header, List<String> lines) {
+        if (lines == null || lines.isEmpty()) {
+            return;
+        }
         StringBuilder builder = new StringBuilder(header);
         builder.append(lines.get(0));
         for (int i = 1; i < lines.size(); ++i) {
             builder.append("\n").append(lines.get(i));
         }
         player.sendMessage(builder.toString());
+    }
+
+    private synchronized void flushListingBroadcast() {
+        this.pendingListingTask = null;
+        if (this.pendingListingNames.isEmpty()) {
+            return;
+        }
+        StringBuilder builder = new StringBuilder("§6新的商品：§f");
+        boolean first = true;
+        for (String itemName : this.pendingListingNames) {
+            if (!first) {
+                builder.append("、");
+            }
+            builder.append(itemName);
+            first = false;
+        }
+        builder.append("§6正在市场热卖中！");
+        this.pendingListingNames.clear();
+        this.plugin.getServer().broadcastMessage(builder.toString());
+    }
+
+    private static boolean isStructuredOperationEcho(String message) {
+        return message.startsWith("§a已购买 ")
+            || message.startsWith("§a已出售 ")
+            || message.startsWith("§a卖单 #");
     }
 
     private void loadOffline() {

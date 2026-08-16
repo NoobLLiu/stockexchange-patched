@@ -10,6 +10,7 @@ package com.github.exchange.manager;
 import com.github.exchange.StockExchangePlugin;
 import com.github.exchange.model.ExchangeItem;
 import com.github.exchange.model.ItemStatus;
+import com.github.exchange.model.Order;
 import com.github.exchange.util.ItemSerializer;
 import com.github.exchange.util.ItemDisplayNames;
 import com.github.exchange.util.SpecialCategory;
@@ -17,7 +18,12 @@ import java.math.BigDecimal;
 import java.sql.Timestamp;
 import java.time.LocalDate;
 import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import org.bukkit.Material;
 import org.bukkit.NamespacedKey;
 import org.bukkit.entity.Player;
@@ -28,6 +34,7 @@ import org.bukkit.persistence.PersistentDataType;
 public class ItemManager {
     private final StockExchangePlugin plugin;
     private final NamespacedKey specialCategoryKey;
+    private final Set<Integer> catalogAliasIds = new HashSet<Integer>();
 
     public ItemManager(StockExchangePlugin plugin) {
         this.plugin = plugin;
@@ -102,7 +109,7 @@ public class ItemManager {
             this.plugin.getLogger().severe("Failed to serialize item to base64!");
             return null;
         }
-        ExchangeItem existing = this.plugin.getStorageManager().getExchangeItemByHash(material, nbtHash);
+        ExchangeItem existing = this.findEquivalentItem(item, material, nbtHash);
         if (existing != null) {
             if (activateSellCatalog) {
                 this.markSellCatalogActivity(existing);
@@ -148,7 +155,7 @@ public class ItemManager {
             this.plugin.getStorageManager().upsertItemStatus(status);
             return exchangeItem;
         }
-        return this.plugin.getStorageManager().getExchangeItemByHash(material, nbtHash);
+        return this.findEquivalentItem(item, material, nbtHash);
     }
 
     public RegisterResult registerOrRestock(Player player, ItemStack item, int quantity) {
@@ -176,7 +183,7 @@ public class ItemManager {
 
         String material = item.getType().name();
         String nbtHash = ItemSerializer.calculateNbtHash(item);
-        ExchangeItem existing = this.plugin.getStorageManager().getExchangeItemByHash(material, nbtHash);
+        ExchangeItem existing = this.findEquivalentItem(item, material, nbtHash);
         if (existing == null) {
             if (!player.hasPermission("exchange.admin")) {
                 int used = this.plugin.getStorageManager().getDailyRegisterCount(player.getUniqueId().toString(), LocalDate.now());
@@ -233,7 +240,7 @@ public class ItemManager {
         }
         String material = item.getType().name();
         String nbtHash = ItemSerializer.calculateNbtHash(item);
-        ExchangeItem existing = this.plugin.getStorageManager().getExchangeItemByHash(material, nbtHash);
+        ExchangeItem existing = this.findEquivalentItem(item, material, nbtHash);
         if (existing != null) {
             if (activateSellCatalog) {
                 this.markSellCatalogActivity(existing);
@@ -346,8 +353,92 @@ public class ItemManager {
 
     public List<ExchangeItem> getAllItems() {
         List<ExchangeItem> items = new ArrayList<ExchangeItem>(this.plugin.getStorageManager().getAllExchangeItems());
+        items.removeIf(item -> this.catalogAliasIds.contains(item.getId()));
         items.sort((a, b) -> Integer.compare(a.getId(), b.getId()));
         return items;
+    }
+
+    public String getCatalogDisplayName(ItemStack item) {
+        if (item == null || item.getType() == Material.AIR) {
+            return "未知物品";
+        }
+        if (ItemSerializer.hasIdentityDataBeyondCustomName(item)) {
+            return ItemDisplayNames.resolve(item);
+        }
+        return ItemDisplayNames.resolve(ItemSerializer.copyWithoutCustomName(item));
+    }
+
+    /**
+     * New registrations compare the complete serialized item identity after only
+     * removing the custom name. This keeps normal renamed items together while
+     * preserving custom data, item models, lore, enchantments and every other
+     * component used by plugins or datapacks.
+     */
+    private ExchangeItem findEquivalentItem(ItemStack item, String material, String nbtHash) {
+        ExchangeItem direct = this.plugin.getStorageManager().getExchangeItemByHash(material, nbtHash);
+        if (direct != null && !this.catalogAliasIds.contains(direct.getId())) {
+            return direct;
+        }
+        for (ExchangeItem candidate : this.plugin.getStorageManager().getAllExchangeItems()) {
+            if (candidate == null
+                || this.catalogAliasIds.contains(candidate.getId())
+                || !material.equals(candidate.getMaterial())
+                || this.getSpecialCategory(candidate) != null) {
+                continue;
+            }
+            ItemStack candidateStack = ItemSerializer.itemFromBase64(candidate.getItemBase64());
+            if (candidateStack != null
+                && nbtHash.equals(ItemSerializer.calculateNbtHash(candidateStack))) {
+                return candidate;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Migrates active orders from old name-only catalog aliases to the earliest
+     * matching item id. Historical items and trades stay untouched, so history
+     * remains readable while the current market no longer shows duplicate kinds.
+     */
+    public void mergeNameOnlyCatalogAliases() {
+        Map<String, ExchangeItem> primaryByIdentity = new HashMap<String, ExchangeItem>();
+        List<ExchangeItem> items = new ArrayList<ExchangeItem>(
+            this.plugin.getStorageManager().getAllExchangeItems()
+        );
+        items.sort(Comparator.comparingInt(ExchangeItem::getId));
+        for (ExchangeItem item : items) {
+            if (item == null || this.getSpecialCategory(item) != null) {
+                continue;
+            }
+            ItemStack stack = ItemSerializer.itemFromBase64(item.getItemBase64());
+            if (stack == null) {
+                continue;
+            }
+            String identity = item.getMaterial() + '\u0001' + ItemSerializer.calculateNbtHash(stack);
+            ExchangeItem primary = primaryByIdentity.putIfAbsent(identity, item);
+            if (primary == null || primary.getId() == item.getId()) {
+                continue;
+            }
+            this.catalogAliasIds.add(item.getId());
+            int moved = this.moveActiveOrders(item.getId(), primary.getId(), Order.OrderType.SELL)
+                + this.moveActiveOrders(item.getId(), primary.getId(), Order.OrderType.BUY);
+            this.plugin.getLogger().info("[CatalogMerge] alias=" + item.getId()
+                + " primary=" + primary.getId() + " activeOrdersMoved=" + moved);
+        }
+    }
+
+    private int moveActiveOrders(int fromItemId, int toItemId, Order.OrderType type) {
+        int moved = 0;
+        for (Order order : this.plugin.getStorageManager().getActiveOrdersByItem(fromItemId, type)) {
+            order.setItemId(toItemId);
+            if (this.plugin.getStorageManager().updateOrder(order)) {
+                moved++;
+            } else {
+                this.plugin.getLogger().severe("[CatalogMerge] failed to move order="
+                    + order.getId() + " from=" + fromItemId + " to=" + toItemId);
+            }
+        }
+        return moved;
     }
 
     public ItemStatus getItemStatus(int itemId) {

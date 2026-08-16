@@ -12,14 +12,9 @@ import com.github.exchange.StockExchangePlugin;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.nio.charset.StandardCharsets;
-import java.util.List;
-import java.util.Map;
-import java.util.Map.Entry;
 import java.util.logging.Level;
 import java.util.logging.Logger;
-import java.util.stream.Collectors;
 import org.bukkit.Bukkit;
-import org.bukkit.enchantments.Enchantment;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.meta.ItemMeta;
 
@@ -59,25 +54,41 @@ public class ItemSerializer {
         if (item == null || item.getType() == org.bukkit.Material.AIR) {
             return "";
         }
-        String input;
-        StringBuilder sb = new StringBuilder();
-        ItemMeta meta = item.getItemMeta();
-        if (meta != null && meta.hasDisplayName()) {
-            sb.append("name:").append(meta.getDisplayName()).append("|");
-        }
-        if (meta != null && meta.hasLore()) {
-            List<String> lore = meta.getLore();
-            String loreStr = lore == null ? "" : lore.stream().collect(Collectors.joining("\n"));
-            sb.append("lore:").append(loreStr).append("|");
-        }
-        if (meta != null && meta.hasEnchants()) {
-            Map<Enchantment, Integer> enchants = meta.getEnchants();
-            String enchantStr = enchants.entrySet().stream().sorted((a, b) -> a.getKey().getKey().toString().compareTo(b.getKey().getKey().toString())).map(e -> e.getKey().getKey().toString() + ":" + e.getValue()).collect(Collectors.joining(","));
-            sb.append("enchants:").append(enchantStr).append("|");
-        }
-        if ((input = sb.toString()).isEmpty()) {
+        String input = itemToBase64(copyWithoutCustomName(item));
+        if (input == null || input.isBlank()) {
             return "";
         }
+        return sha256(input);
+    }
+
+    public static ItemStack copyWithoutCustomName(ItemStack item) {
+        if (item == null) {
+            return null;
+        }
+        ItemStack normalized = item.clone();
+        normalized.setAmount(1);
+        ItemMeta meta = normalized.getItemMeta();
+        if (meta != null && meta.hasDisplayName()) {
+            meta.setDisplayName(null);
+            normalized.setItemMeta(meta);
+        }
+        return normalized;
+    }
+
+    public static boolean hasIdentityDataBeyondCustomName(ItemStack item) {
+        if (item == null || item.getType() == org.bukkit.Material.AIR) {
+            return false;
+        }
+        ItemStack normalized = copyWithoutCustomName(item);
+        ItemStack plain = new ItemStack(item.getType(), 1);
+        String normalizedBase64 = itemToBase64(normalized);
+        String plainBase64 = itemToBase64(plain);
+        return normalizedBase64 != null
+            && plainBase64 != null
+            && !normalizedBase64.equals(plainBase64);
+    }
+
+    private static String sha256(String input) {
         try {
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
             byte[] hash = digest.digest(input.getBytes(StandardCharsets.UTF_8));

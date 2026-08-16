@@ -17,6 +17,7 @@ import com.github.exchange.util.EconomyUtil;
 import com.github.exchange.util.InventoryDelivery;
 import com.github.exchange.util.ItemDisplayNames;
 import com.github.exchange.util.ItemSerializer;
+import com.github.exchange.util.BuyEscrowPolicy;
 import com.github.exchange.util.MarketGuiItem;
 import com.github.exchange.util.SpecialCategory;
 import com.github.exchange.util.TaxCalculator;
@@ -90,7 +91,9 @@ public class OrderManager {
             + " escrow=" + order.getRemainingQty());
         this.matchOrder(order);
         this.refreshLowestSellStatus(exchangeItem.getId());
-        this.broadcastNewListing(exchangeItem);
+        String listingName = this.plugin.getItemManager().getCatalogDisplayName(actualItem);
+        this.plugin.getTradeNoticeBuffer().listed(player, listingName, quantity);
+        this.broadcastNewListing(listingName);
         return "\u00a7a\u5356\u5355 #" + order.getId() + " \u5df2\u521b\u5efa\uff01\u5355\u4ef7: " + price + ", \u6570\u91cf: " + quantity;
     }
 
@@ -227,7 +230,7 @@ public class OrderManager {
         BigDecimal totalCost = price.multiply(BigDecimal.valueOf(quantity));
         BigDecimal tax = TaxCalculator.tax(totalCost, this.plugin.getTaxRatePercent());
         BigDecimal chargedTotal = TaxCalculator.withTax(totalCost, this.plugin.getTaxRatePercent());
-        BigDecimal escrowTotal = totalCost;
+        BigDecimal escrowTotal = BuyEscrowPolicy.reserve(totalCost, this.plugin.getTaxRatePercent());
         UUID playerUuid = player.getUniqueId();
         if (!EconomyUtil.hasBalance(playerUuid, chargedTotal)) {
             return "\u00a7c\u4f59\u989d\u4e0d\u8db3\uff01\u9700\u8981: " + chargedTotal
@@ -258,14 +261,13 @@ public class OrderManager {
         escrow.setPlayerUuid(player.getUniqueId().toString());
         escrow.setAssetType(EscrowEntry.AssetType.MONEY);
         escrow.setAmount(escrowTotal);
-        escrow.setItemBase64(null);
+        escrow.setItemBase64(BuyEscrowPolicy.marker(this.plugin.getTaxRatePercent()));
         escrow.setQuantity(0);
         if (!this.plugin.getStorageManager().insertEscrow(escrow)
-            || !this.isValidMoneyEscrow(order, this.plugin.getStorageManager().getEscrow(orderId, EscrowEntry.AssetType.MONEY), escrowTotal)) {
+            || !this.isValidMoneyEscrow(order, this.plugin.getStorageManager().getEscrow(orderId, EscrowEntry.AssetType.MONEY), totalCost)) {
             this.abortBuyOrderCreation(order, chargedTotal);
             return "\u00a7c\u8ba2\u5355\u6258\u7ba1\u5199\u5165\u5931\u8d25\uff0c\u5df2\u9000\u56de\u6263\u9664\u7684\u661f\u5149\u70b9\u3002";
         }
-        this.plugin.collectTax(tax);
         this.matchOrder(order);
         this.refreshLowestSellStatus(exchangeItem.getId());
         this.broadcastNewBuyRequest(exchangeItem, price);
@@ -341,7 +343,7 @@ public class OrderManager {
         BigDecimal totalCost = sellOrder.getPrice().multiply(BigDecimal.valueOf(quantity));
         BigDecimal tax = TaxCalculator.tax(totalCost, this.plugin.getTaxRatePercent());
         BigDecimal chargedTotal = TaxCalculator.withTax(totalCost, this.plugin.getTaxRatePercent());
-        BigDecimal escrowTotal = totalCost;
+        BigDecimal escrowTotal = BuyEscrowPolicy.reserve(totalCost, this.plugin.getTaxRatePercent());
         UUID playerUuid = player.getUniqueId();
         if (!EconomyUtil.hasBalance(playerUuid, chargedTotal)) {
             return "\u00a7c\u4f59\u989d\u4e0d\u8db3\uff01\u9700\u8981: " + chargedTotal
@@ -372,19 +374,22 @@ public class OrderManager {
         escrow.setPlayerUuid(playerUuid.toString());
         escrow.setAssetType(EscrowEntry.AssetType.MONEY);
         escrow.setAmount(escrowTotal);
-        escrow.setItemBase64(null);
+        escrow.setItemBase64(BuyEscrowPolicy.marker(this.plugin.getTaxRatePercent()));
         escrow.setQuantity(0);
         if (!this.plugin.getStorageManager().insertEscrow(escrow)
-            || !this.isValidMoneyEscrow(buyOrder, this.plugin.getStorageManager().getEscrow(orderId, EscrowEntry.AssetType.MONEY), escrowTotal)) {
+            || !this.isValidMoneyEscrow(buyOrder, this.plugin.getStorageManager().getEscrow(orderId, EscrowEntry.AssetType.MONEY), totalCost)) {
             this.abortBuyOrderCreation(buyOrder, chargedTotal);
             return "\u00a7c\u8d2d\u4e70\u8ba2\u5355\u6258\u7ba1\u5199\u5165\u5931\u8d25\uff0c\u5df2\u9000\u56de\u6263\u9664\u7684\u661f\u5149\u70b9\u3002";
         }
-        if (!this.executeMatch(buyOrder, sellOrder, quantity)) {
+        if (!this.executeMatch(buyOrder, sellOrder, quantity, false, true)) {
             String cancelResult = this.cancelOrder(player, orderId);
             return "\u00a7c\u4ea4\u6613\u672a\u5b8c\u6210\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u3002 " + cancelResult;
         }
-        this.plugin.collectTax(tax);
-        return "\u00a7a\u5df2\u8d2d\u4e70 " + exchangeItem.getDisplayName() + " x" + quantity
+        String itemName = this.resolveOrderItemName(sellOrder, exchangeItem);
+        this.plugin.getTradeNoticeBuffer().purchased(
+            player, itemName, quantity, totalCost, tax, chargedTotal
+        );
+        return "\u00a7a\u5df2\u8d2d\u4e70 " + itemName + " x" + quantity
             + "\uff0c\u6210\u4ea4\u4ef7: " + sellOrder.getPrice()
             + "\uff0c\u4ea4\u6613\u7a0e: " + tax + "\uff0c\u5b9e\u9645\u6263\u6b3e: " + chargedTotal;
     }
@@ -435,12 +440,18 @@ public class OrderManager {
             + " sellOrder=" + sellOrder.getId() + " buyOrder=" + buyOrderId + " item=" + exchangeItem.getId()
             + " removed=" + (creation.removal == null ? quantity : creation.removal.removedQuantity())
             + " escrow=" + sellOrder.getRemainingQty());
-        if (!this.executeMatch(buyOrder, sellOrder, quantity)) {
+        if (!this.executeMatch(buyOrder, sellOrder, quantity, true, false)) {
             String cancelResult = this.cancelOrder(player, sellOrder.getId());
             return "\u00a7c\u4ea4\u6613\u672a\u5b8c\u6210\uff0c\u7269\u54c1\u672a\u6210\u4ea4\u3002 " + cancelResult;
         }
         this.refreshLowestSellStatus(exchangeItem.getId());
-        return "\u00a7a\u5df2\u51fa\u552e " + exchangeItem.getDisplayName() + " x" + quantity + "\uff0c\u6210\u4ea4\u4ef7: " + buyOrder.getPrice();
+        BigDecimal gross = buyOrder.getPrice().multiply(BigDecimal.valueOf(quantity));
+        BigDecimal tax = this.calculateSellerFee(gross);
+        String itemName = this.resolveOrderItemName(sellOrder, exchangeItem);
+        this.plugin.getTradeNoticeBuffer().sold(
+            player, itemName, quantity, gross, tax, gross.subtract(tax)
+        );
+        return "\u00a7a\u5df2\u51fa\u552e " + itemName + " x" + quantity + "\uff0c\u6210\u4ea4\u4ef7: " + buyOrder.getPrice();
     }
 
     private String supplySpecialCategoryToBuyOrder(Player player, Order buyOrder, ExchangeItem exchangeItem, int quantity) {
@@ -501,19 +512,29 @@ public class OrderManager {
                     + " item=" + exchangeItem.getId()
                     + " removed=" + (creation.removal == null ? chunk : creation.removal.removedQuantity())
                     + " escrow=" + creation.order.getRemainingQty());
-                if (!this.executeMatch(buyOrder, creation.order, chunk)) {
+                if (!this.executeMatch(buyOrder, creation.order, chunk, true, false)) {
                     String cancelResult = this.cancelOrder(player, creation.order.getId());
                     return supplied > 0
                         ? "\u00a7a\u5df2\u4f9b\u8d27 " + supplied + " \u4e2a\uff0c\u540e\u7eed\u4ea4\u6613\u672a\u5b8c\u6210\u3002 " + cancelResult
                         : "\u00a7c\u4ea4\u6613\u672a\u5b8c\u6210\uff0c\u7269\u54c1\u672a\u6210\u4ea4\u3002 " + cancelResult;
                 }
+                BigDecimal gross = buyOrder.getPrice().multiply(BigDecimal.valueOf(chunk));
+                BigDecimal tax = this.calculateSellerFee(gross);
+                this.plugin.getTradeNoticeBuffer().sold(
+                    player,
+                    this.plugin.getItemManager().getCatalogDisplayName(entry.item),
+                    chunk,
+                    gross,
+                    tax,
+                    gross.subtract(tax)
+                );
                 supplied += chunk;
                 orderRemaining -= chunk;
                 remaining -= chunk;
             }
         }
         this.refreshLowestSellStatus(exchangeItem.getId());
-        return "\u00a7a\u5df2\u51fa\u552e " + exchangeItem.getDisplayName() + " x" + supplied
+        return "\u00a7a\u5df2\u51fa\u552e " + category.displayName() + " x" + supplied
             + "\uff0c\u6210\u4ea4\u4ef7: " + buyOrder.getPrice();
     }
 
@@ -854,7 +875,9 @@ public class OrderManager {
                 + " order=" + orderId + " item=" + order.getItemId() + " refund=" + order.getRemainingQty());
             this.refreshLowestSellStatus(order.getItemId());
         }
-        return "\u00a7a\u8ba2\u5355 #" + orderId + " \u5df2\u53d6\u6d88\uff0c\u8d44\u4ea7\u5df2\u9000\u56de\u3002";
+        return order.getOrderType() == Order.OrderType.BUY
+            ? "\u00a7a\u6c42\u8d2d\u5355 #" + orderId + " \u5df2\u53d6\u6d88\uff0c\u672a\u6210\u4ea4\u672c\u91d1\u4e0e\u4ea4\u6613\u7a0e\u5df2\u5168\u90e8\u9000\u56de\u3002"
+            : "\u00a7a\u8ba2\u5355 #" + orderId + " \u5df2\u53d6\u6d88\uff0c\u8d44\u4ea7\u5df2\u9000\u56de\u3002";
     }
 
     public synchronized String withdrawOrderQuantity(Player player, int orderId, int quantity) {
@@ -911,7 +934,7 @@ public class OrderManager {
             return "\u00a7a\u5df2\u53d6\u56de " + withdraw + " \u4e2a\u7269\u54c1\uff0c\u5356\u5355 #" + orderId
                 + " \u5269\u4f59 " + (remaining - withdraw) + " \u4e2a\u3002";
         }
-        BigDecimal refund = order.getPrice().multiply(BigDecimal.valueOf(withdraw));
+        BigDecimal principalRefund = order.getPrice().multiply(BigDecimal.valueOf(withdraw));
         BigDecimal required = order.getPrice().multiply(BigDecimal.valueOf(remaining));
         EscrowEntry escrow = this.plugin.getStorageManager().getEscrow(order.getId(), EscrowEntry.AssetType.MONEY);
         if (!this.isValidMoneyEscrow(order, escrow, required)) {
@@ -925,18 +948,33 @@ public class OrderManager {
         if (!this.plugin.getStorageManager().updateOrder(next)) {
             return "\u00a7c\u8ba2\u5355\u72b6\u6001\u4fdd\u5b58\u5931\u8d25\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u3002";
         }
+        boolean taxReservedInEscrow = BuyEscrowPolicy.reservedRate(escrow.getItemBase64()) != null;
+        BigDecimal taxRefund = taxReservedInEscrow
+            ? TaxCalculator.tax(principalRefund, BuyEscrowPolicy.reservedRate(escrow.getItemBase64()))
+            : TaxCalculator.tax(principalRefund, this.plugin.getTaxRatePercent());
+        BigDecimal escrowRefund = principalRefund.add(
+            taxReservedInEscrow ? taxRefund : BigDecimal.ZERO
+        );
+        BigDecimal legacyTaxRefund = taxReservedInEscrow ? BigDecimal.ZERO : taxRefund;
+        BigDecimal refund = principalRefund.add(taxRefund);
+        if (!this.plugin.refundCollectedTax(legacyTaxRefund)) {
+            this.plugin.getStorageManager().updateOrder(order);
+            return "\u00a7c\u7cfb\u7edf\u7a0e\u6b3e\u8d26\u6237\u4f59\u989d\u4e0d\u8db3\uff0c\u5df2\u4fdd\u7559\u6c42\u8d2d\u5355\uff0c\u8bf7\u8054\u7cfb\u7ba1\u7406\u5458\u3002";
+        }
         EscrowEntry nextEscrow = this.copyEscrow(escrow);
-        nextEscrow.setAmount(escrow.getAmount().subtract(refund));
+        nextEscrow.setAmount(escrow.getAmount().subtract(escrowRefund));
         if (!this.plugin.getStorageManager().insertEscrow(nextEscrow)
             || !this.deliverRefundedMoney(this.parseUuid(order.getPlayerUuid()), refund)) {
             this.plugin.getStorageManager().updateOrder(order);
             this.restoreEscrowState(escrow);
+            this.plugin.collectTax(legacyTaxRefund);
             return "\u00a7c\u53d6\u56de\u5931\u8d25\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u3002";
         }
         this.plugin.getLogger().info("[AssetAudit] BUY_PARTIAL_WITHDRAW player=" + player.getUniqueId()
             + " order=" + orderId + " item=" + order.getItemId() + " refund=" + refund.toPlainString());
-        return "\u00a7a\u5df2\u51cf\u5c11 " + withdraw + " \u4e2a\u6c42\u8d2d\uff0c\u9000\u56de " + refund.toPlainString()
-            + " " + this.plugin.getCurrencyName() + "\uff0c\u6c42\u8d2d\u5355 #" + orderId
+        return "\u00a7a\u5df2\u51cf\u5c11 " + withdraw + " \u4e2a\u6c42\u8d2d\uff0c\u9000\u56de\u672c\u91d1 "
+            + principalRefund.toPlainString() + " \u4e0e\u4ea4\u6613\u7a0e " + taxRefund.toPlainString()
+            + "\uff08\u5171 " + refund.toPlainString() + " " + this.plugin.getCurrencyName() + "\uff09\uff0c\u6c42\u8d2d\u5355 #" + orderId
             + " \u5269\u4f59 " + (remaining - withdraw) + " \u4e2a\u3002";
     }
 
@@ -979,7 +1017,7 @@ public class OrderManager {
             + " removed=" + quantity + " escrow=" + order.getRemainingQty());
         this.matchOrder(order);
         this.refreshLowestSellStatus(exchangeItem.getId());
-        this.broadcastNewListing(exchangeItem);
+        this.broadcastNewListing(this.plugin.getItemManager().getCatalogDisplayName(actualItem));
         return "\u00a7a\u5356\u5355 #" + order.getId() + " \u5df2\u521b\u5efa\uff01\u5355\u4ef7: "
             + price + ", \u6570\u91cf: " + quantity;
     }
@@ -1113,8 +1151,8 @@ public class OrderManager {
         escrow.setOrderId(orderId);
         escrow.setPlayerUuid(uuid);
         escrow.setAssetType(EscrowEntry.AssetType.MONEY);
-        escrow.setAmount(totalCost);
-        escrow.setItemBase64(null);
+        escrow.setAmount(BuyEscrowPolicy.reserve(totalCost, this.plugin.getTaxRatePercent()));
+        escrow.setItemBase64(BuyEscrowPolicy.marker(this.plugin.getTaxRatePercent()));
         escrow.setQuantity(0);
         if (!this.plugin.getStorageManager().insertEscrow(escrow)
             || !this.isValidMoneyEscrow(order, this.plugin.getStorageManager().getEscrow(orderId, EscrowEntry.AssetType.MONEY), totalCost)) {
@@ -1124,7 +1162,6 @@ public class OrderManager {
             this.plugin.getStorageManager().addToMoneyWarehouse(uuid, chargedTotal);
             return "\u00a7c\u8ba2\u5355\u6258\u7ba1\u5199\u5165\u5931\u8d25\uff0c\u5df2\u9000\u56de\u4ed3\u5e93\u6263\u9664\u7684\u661f\u5149\u70b9\u3002";
         }
-        this.plugin.collectTax(tax);
         this.plugin.getLogger().info("[WebMarket] BUY_CREATE player=" + uuid
             + " order=" + orderId + " item=" + exchangeItem.getId()
             + " price=" + price + " qty=" + quantity);
@@ -1196,8 +1233,8 @@ public class OrderManager {
         escrow.setOrderId(orderId);
         escrow.setPlayerUuid(uuid);
         escrow.setAssetType(EscrowEntry.AssetType.MONEY);
-        escrow.setAmount(totalCost);
-        escrow.setItemBase64(null);
+        escrow.setAmount(BuyEscrowPolicy.reserve(totalCost, this.plugin.getTaxRatePercent()));
+        escrow.setItemBase64(BuyEscrowPolicy.marker(this.plugin.getTaxRatePercent()));
         escrow.setQuantity(0);
         if (!this.plugin.getStorageManager().insertEscrow(escrow)
             || !this.isValidMoneyEscrow(buyOrder, this.plugin.getStorageManager().getEscrow(orderId, EscrowEntry.AssetType.MONEY), totalCost)) {
@@ -1207,12 +1244,11 @@ public class OrderManager {
             this.plugin.getStorageManager().addToMoneyWarehouse(uuid, chargedTotal);
             return "\u00a7c\u8d2d\u4e70\u8ba2\u5355\u6258\u7ba1\u5199\u5165\u5931\u8d25\uff0c\u5df2\u9000\u56de\u4ed3\u5e93\u6263\u9664\u7684\u661f\u5149\u70b9\u3002";
         }
-        this.plugin.collectTax(tax);
-        if (!this.executeMatch(buyOrder, sellOrder, quantity)) {
+        if (!this.executeMatch(buyOrder, sellOrder, quantity, false, true)) {
             String cancelResult = this.webCancel(uuid, false, orderId);
             return "\u00a7c\u4ea4\u6613\u672a\u5b8c\u6210\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u3002 " + cancelResult;
         }
-        return "\u00a7a\u5df2\u8d2d\u4e70 " + exchangeItem.getDisplayName() + " x" + quantity
+        return "\u00a7a\u5df2\u8d2d\u4e70 " + this.resolveOrderItemName(sellOrder, exchangeItem) + " x" + quantity
             + "\uff0c\u6210\u4ea4\u4ef7: " + sellOrder.getPrice()
             + "\uff0c\u4ea4\u6613\u7a0e: " + tax + "\uff0c\u5b9e\u9645\u6263\u6b3e: " + chargedTotal;
     }
@@ -1263,12 +1299,12 @@ public class OrderManager {
         this.plugin.getLogger().info("[WebMarket] SELL_TO_BUY player=" + uuid
             + " sellOrder=" + sellOrder.getId() + " buyOrder=" + buyOrderId
             + " item=" + exchangeItem.getId() + " removed=" + quantity);
-        if (!this.executeMatch(buyOrder, sellOrder, quantity)) {
+        if (!this.executeMatch(buyOrder, sellOrder, quantity, true, false)) {
             String cancelResult = this.webCancel(uuid, false, sellOrder.getId());
             return "\u00a7c\u4ea4\u6613\u672a\u5b8c\u6210\uff0c\u7269\u54c1\u672a\u6210\u4ea4\u3002 " + cancelResult;
         }
         this.refreshLowestSellStatus(exchangeItem.getId());
-        return "\u00a7a\u5df2\u51fa\u552e " + exchangeItem.getDisplayName() + " x" + quantity
+        return "\u00a7a\u5df2\u51fa\u552e " + this.resolveOrderItemName(sellOrder, exchangeItem) + " x" + quantity
             + "\uff0c\u6210\u4ea4\u4ef7: " + buyOrder.getPrice();
     }
 
@@ -1322,7 +1358,7 @@ public class OrderManager {
                 this.plugin.getLogger().info("[WebMarket] SELL_TO_BUY player=" + uuid
                     + " sellOrder=" + creation.order().getId() + " buyOrder=" + buyOrder.getId()
                     + " item=" + exchangeItem.getId() + " removed=" + chunk);
-                if (!this.executeMatch(buyOrder, creation.order(), chunk)) {
+                if (!this.executeMatch(buyOrder, creation.order(), chunk, true, false)) {
                     String cancelResult = this.webCancel(uuid, false, creation.order().getId());
                     return supplied > 0
                         ? "\u00a7a\u5df2\u4f9b\u8d27 " + supplied + " \u4e2a\uff0c\u540e\u7eed\u4ea4\u6613\u672a\u5b8c\u6210\u3002 " + cancelResult
@@ -1514,12 +1550,25 @@ public class OrderManager {
             if (!this.plugin.getStorageManager().updateOrder(cancelledOrder)) {
                 return "\u00a7c\u8ba2\u5355\u72b6\u6001\u4fdd\u5b58\u5931\u8d25\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u3002";
             }
-            BigDecimal refund = escrow == null ? required : escrow.getAmount();
+            BigDecimal legacyTaxRefund = BuyEscrowPolicy.legacyRefundTax(
+                required, escrow == null ? null : escrow.getItemBase64(), this.plugin.getTaxRatePercent()
+            );
+            BigDecimal refund = (escrow == null ? required : escrow.getAmount()).add(legacyTaxRefund);
+            if (!this.plugin.refundCollectedTax(legacyTaxRefund)) {
+                this.plugin.getStorageManager().updateOrder(order);
+                return "\u00a7c\u7cfb\u7edf\u7a0e\u6b3e\u8d26\u6237\u4f59\u989d\u4e0d\u8db3\uff0c\u5df2\u4fdd\u7559\u6c42\u8d2d\u5355\uff0c\u8bf7\u8054\u7cfb\u7ba1\u7406\u5458\u3002";
+            }
             if (!this.plugin.getStorageManager().addToMoneyWarehouse(owner, refund)) {
+                this.plugin.getStorageManager().updateOrder(order);
+                this.plugin.collectTax(legacyTaxRefund);
+                return "\u00a7c\u8d44\u4ea7\u9000\u56de\u5931\u8d25\uff0c\u8ba2\u5355\u5df2\u6062\u590d\u4e3a\u6d3b\u8dc3\u72b6\u6001\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u3002";
+            }
+            if (!this.plugin.getStorageManager().deleteEscrow(order.getId(), EscrowEntry.AssetType.MONEY)) {
+                this.plugin.getStorageManager().takeFromMoneyWarehouse(owner, refund);
+                this.plugin.collectTax(legacyTaxRefund);
                 this.plugin.getStorageManager().updateOrder(order);
                 return "\u00a7c\u8d44\u4ea7\u9000\u56de\u5931\u8d25\uff0c\u8ba2\u5355\u5df2\u6062\u590d\u4e3a\u6d3b\u8dc3\u72b6\u6001\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u3002";
             }
-            this.plugin.getStorageManager().deleteEscrow(order.getId(), EscrowEntry.AssetType.MONEY);
             this.plugin.getLogger().info("[WebMarket] BUY_CANCEL player=" + uuid
                 + " order=" + orderId + " refund=" + refund);
         }
@@ -1581,7 +1630,7 @@ public class OrderManager {
             return "\u00a7a\u5df2\u53d6\u56de " + withdraw + " \u4e2a\u7269\u54c1\uff0c\u5356\u5355 #" + orderId
                 + " \u5269\u4f59 " + (remaining - withdraw) + " \u4e2a\u3002";
         }
-        BigDecimal refund = order.getPrice().multiply(BigDecimal.valueOf(withdraw));
+        BigDecimal principalRefund = order.getPrice().multiply(BigDecimal.valueOf(withdraw));
         BigDecimal required = order.getPrice().multiply(BigDecimal.valueOf(remaining));
         EscrowEntry escrow = this.plugin.getStorageManager().getEscrow(order.getId(), EscrowEntry.AssetType.MONEY);
         if (!this.isValidMoneyEscrow(order, escrow, required)) {
@@ -1595,18 +1644,33 @@ public class OrderManager {
         if (!this.plugin.getStorageManager().updateOrder(next)) {
             return "\u00a7c\u8ba2\u5355\u72b6\u6001\u4fdd\u5b58\u5931\u8d25\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u3002";
         }
+        boolean taxReservedInEscrow = BuyEscrowPolicy.reservedRate(escrow.getItemBase64()) != null;
+        BigDecimal taxRefund = taxReservedInEscrow
+            ? TaxCalculator.tax(principalRefund, BuyEscrowPolicy.reservedRate(escrow.getItemBase64()))
+            : TaxCalculator.tax(principalRefund, this.plugin.getTaxRatePercent());
+        BigDecimal escrowRefund = principalRefund.add(
+            taxReservedInEscrow ? taxRefund : BigDecimal.ZERO
+        );
+        BigDecimal legacyTaxRefund = taxReservedInEscrow ? BigDecimal.ZERO : taxRefund;
+        BigDecimal refund = principalRefund.add(taxRefund);
+        if (!this.plugin.refundCollectedTax(legacyTaxRefund)) {
+            this.plugin.getStorageManager().updateOrder(order);
+            return "\u00a7c\u7cfb\u7edf\u7a0e\u6b3e\u8d26\u6237\u4f59\u989d\u4e0d\u8db3\uff0c\u5df2\u4fdd\u7559\u6c42\u8d2d\u5355\uff0c\u8bf7\u8054\u7cfb\u7ba1\u7406\u5458\u3002";
+        }
         EscrowEntry nextEscrow = this.copyEscrow(escrow);
-        nextEscrow.setAmount(escrow.getAmount().subtract(refund));
+        nextEscrow.setAmount(escrow.getAmount().subtract(escrowRefund));
         if (!this.plugin.getStorageManager().insertEscrow(nextEscrow)
             || !this.plugin.getStorageManager().addToMoneyWarehouse(owner, refund)) {
             this.plugin.getStorageManager().updateOrder(order);
             this.restoreEscrowState(escrow);
+            this.plugin.collectTax(legacyTaxRefund);
             return "\u00a7c\u53d6\u56de\u5931\u8d25\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u3002";
         }
         this.plugin.getLogger().info("[WebMarket] BUY_PARTIAL_WITHDRAW player=" + uuid
             + " order=" + orderId + " item=" + order.getItemId() + " refund=" + refund.toPlainString());
-        return "\u00a7a\u5df2\u51cf\u5c11 " + withdraw + " \u4e2a\u6c42\u8d2d\uff0c\u9000\u56de " + refund.toPlainString()
-            + " " + this.plugin.getCurrencyName() + "\uff0c\u6c42\u8d2d\u5355 #" + orderId
+        return "\u00a7a\u5df2\u51cf\u5c11 " + withdraw + " \u4e2a\u6c42\u8d2d\uff0c\u9000\u56de\u672c\u91d1 "
+            + principalRefund.toPlainString() + " \u4e0e\u4ea4\u6613\u7a0e " + taxRefund.toPlainString()
+            + "\uff08\u5171 " + refund.toPlainString() + " " + this.plugin.getCurrencyName() + "\uff09\uff0c\u6c42\u8d2d\u5355 #" + orderId
             + " \u5269\u4f59 " + (remaining - withdraw) + " \u4e2a\u3002";
     }
 
@@ -1687,6 +1751,16 @@ public class OrderManager {
     }
 
     private boolean executeMatch(Order buyOrder, Order sellOrder, int quantity) {
+        return this.executeMatch(buyOrder, sellOrder, quantity, true, true);
+    }
+
+    private boolean executeMatch(
+        Order buyOrder,
+        Order sellOrder,
+        int quantity,
+        boolean notifyBuyer,
+        boolean notifySeller
+    ) {
         if (buyOrder == null || sellOrder == null
             || !buyOrder.isActive()
             || !sellOrder.isActive()
@@ -1731,7 +1805,10 @@ public class OrderManager {
 
         BigDecimal lowestSellBeforeTrade = this.getLowestSellPrice(buyOrder.getItemId());
         BigDecimal totalAmount = matchedMoney;
-        BigDecimal buyerFee = BigDecimal.ZERO.setScale(2);
+        BigDecimal buyerFee = BuyEscrowPolicy.matchedTax(
+            totalAmount,
+            buyerEscrow.getItemBase64()
+        );
         BigDecimal sellerFee = this.calculateSellerFee(totalAmount);
         BigDecimal sellerReceives = totalAmount.subtract(sellerFee);
         UUID buyerUuid;
@@ -1747,7 +1824,9 @@ public class OrderManager {
         }
 
         EscrowEntry nextBuyerEscrow = this.copyEscrow(buyerEscrow);
-        nextBuyerEscrow.setAmount(buyerEscrow.getAmount().subtract(matchedMoney));
+        nextBuyerEscrow.setAmount(
+            buyerEscrow.getAmount().subtract(matchedMoney.add(buyerFee))
+        );
         EscrowEntry nextSellerEscrow = this.copyEscrow(sellerEscrow);
         nextSellerEscrow.setQuantity(sellerEscrow.getQuantity() - quantity);
         if (!this.writeEscrowState(buyerEscrow, nextBuyerEscrow)
@@ -1841,6 +1920,7 @@ public class OrderManager {
             return false;
         }
 
+        this.plugin.collectTax(buyerFee);
         this.plugin.collectTax(sellerFee);
         this.updateItemStatusAfterTrade(buyOrder.getItemId(), tradePrice, quantity);
         this.refreshLowestSellStatus(buyOrder.getItemId(), lowestSellBeforeTrade);
@@ -1850,12 +1930,22 @@ public class OrderManager {
         }
         this.copySettledOrder(buyOrder, settledBuyOrder);
         this.copySettledOrder(sellOrder, settledSellOrder);
-        this.notifyMatchParties(buyOrder, sellOrder, deliveredItemBase64, quantity, sellerReceives);
+        this.notifyMatchParties(
+            buyOrder,
+            sellOrder,
+            deliveredItemBase64,
+            quantity,
+            sellerReceives,
+            notifyBuyer,
+            notifySeller
+        );
         return true;
     }
 
     private void notifyMatchParties(Order buyOrder, Order sellOrder, String itemBase64, int quantity,
-                                    BigDecimal sellerReceives) {
+                                    BigDecimal sellerReceives,
+                                    boolean notifyBuyer,
+                                    boolean notifySeller) {
         try {
             String itemName = "#" + buyOrder.getItemId();
             ItemStack item = ItemSerializer.itemFromBase64(itemBase64);
@@ -1864,10 +1954,10 @@ public class OrderManager {
             }
             UUID buyerUuid = this.parseUuid(buyOrder.getPlayerUuid());
             UUID sellerUuid = this.parseUuid(sellOrder.getPlayerUuid());
-            if (buyerUuid != null) {
+            if (notifyBuyer && buyerUuid != null) {
                 this.plugin.getTradeNoticeBuffer().passiveArrived(buyerUuid, itemName, quantity);
             }
-            if (sellerUuid != null) {
+            if (notifySeller && sellerUuid != null) {
                 this.plugin.getTradeNoticeBuffer().passiveSold(
                     sellerUuid, buyerUuid, itemName, quantity, sellerReceives);
             }
@@ -1875,6 +1965,24 @@ public class OrderManager {
         catch (Throwable throwable) {
             this.plugin.getLogger().warning("[Notifier] passive notice failed: " + throwable.getMessage());
         }
+    }
+
+    private String resolveOrderItemName(Order sellOrder, ExchangeItem fallback) {
+        if (sellOrder != null) {
+            EscrowEntry escrow = this.plugin.getStorageManager().getEscrow(
+                sellOrder.getId(), EscrowEntry.AssetType.ITEM
+            );
+            if (escrow != null) {
+                ItemStack item = ItemSerializer.itemFromBase64(escrow.getItemBase64());
+                if (item != null) {
+                    return this.plugin.getItemManager().getCatalogDisplayName(item);
+                }
+            }
+        }
+        if (fallback != null && fallback.getDisplayName() != null && !fallback.getDisplayName().isBlank()) {
+            return fallback.getDisplayName();
+        }
+        return sellOrder == null ? "\u672a\u77e5\u7269\u54c1" : "#" + sellOrder.getItemId();
     }
 
     private boolean deliverMatchedItems(UUID buyerUuid, String itemBase64, int quantity) {
@@ -2103,14 +2211,11 @@ public class OrderManager {
         this.plugin.getItemManager().updateItemStatus(status);
     }
 
-    private void broadcastNewListing(ExchangeItem exchangeItem) {
-        if (exchangeItem == null) {
+    private void broadcastNewListing(String itemName) {
+        if (itemName == null || itemName.isBlank()) {
             return;
         }
-        String name = exchangeItem.getDisplayName() != null && !exchangeItem.getDisplayName().isBlank()
-            ? exchangeItem.getDisplayName() : "#" + exchangeItem.getId();
-        this.plugin.getServer().broadcastMessage(
-            "\u00a76\u65b0\u7684\u5546\u54c1\uff1a\u00a7f" + name + "\u00a76\u6b63\u5728\u5e02\u573a\u70ed\u5356\u4e2d\uff01");
+        this.plugin.getTradeNoticeBuffer().broadcastListing(itemName);
     }
 
     private void broadcastNewBuyRequest(ExchangeItem exchangeItem, BigDecimal price) {
@@ -2138,12 +2243,22 @@ public class OrderManager {
             }
             if (escrow != null && escrow.getAmount() != null
                 && escrow.getAmount().compareTo(BigDecimal.ZERO) > 0) {
-                BigDecimal amount = escrow.getAmount();
-                if (!this.plugin.getStorageManager().deleteEscrow(order.getId(), EscrowEntry.AssetType.MONEY)) {
+                BigDecimal legacyTaxRefund = BuyEscrowPolicy.legacyRefundTax(
+                    order.getPrice().multiply(BigDecimal.valueOf(order.getRemainingQty())),
+                    escrow.getItemBase64(),
+                    this.plugin.getTaxRatePercent()
+                );
+                BigDecimal refund = escrow.getAmount().add(legacyTaxRefund);
+                if (!this.plugin.refundCollectedTax(legacyTaxRefund)) {
                     return false;
                 }
-                if (!this.deliverRefundedMoney(playerUuid, amount)) {
+                if (!this.plugin.getStorageManager().deleteEscrow(order.getId(), EscrowEntry.AssetType.MONEY)) {
+                    this.plugin.collectTax(legacyTaxRefund);
+                    return false;
+                }
+                if (!this.deliverRefundedMoney(playerUuid, refund)) {
                     this.plugin.getStorageManager().insertEscrow(escrow);
+                    this.plugin.collectTax(legacyTaxRefund);
                     return false;
                 }
             }
@@ -2192,6 +2307,9 @@ public class OrderManager {
     }
 
     private boolean isValidMoneyEscrow(Order order, EscrowEntry escrow, BigDecimal requiredAmount) {
+        BigDecimal requiredWithReservedTax = escrow == null
+            ? requiredAmount
+            : BuyEscrowPolicy.required(requiredAmount, escrow.getItemBase64());
         return order != null
             && order.getOrderType() == Order.OrderType.BUY
             && escrow != null
@@ -2199,9 +2317,9 @@ public class OrderManager {
             && order.getPlayerUuid() != null
             && order.getPlayerUuid().equals(escrow.getPlayerUuid())
             && escrow.getAmount() != null
-            && requiredAmount != null
-            && requiredAmount.compareTo(BigDecimal.ZERO) >= 0
-            && escrow.getAmount().compareTo(requiredAmount) >= 0;
+            && requiredWithReservedTax != null
+            && requiredWithReservedTax.compareTo(BigDecimal.ZERO) >= 0
+            && escrow.getAmount().compareTo(requiredWithReservedTax) >= 0;
     }
 
     private boolean writeEscrowState(EscrowEntry previous, EscrowEntry next) {
