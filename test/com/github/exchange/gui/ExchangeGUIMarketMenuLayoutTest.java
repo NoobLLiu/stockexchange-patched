@@ -1,5 +1,7 @@
 package com.github.exchange.gui;
 
+import com.github.exchange.util.SpecialCategory;
+
 public final class ExchangeGUIMarketMenuLayoutTest {
     public static void main(String[] args) {
         assert MarketMenuLayout.ITEM_PAGE_SIZE == 36
@@ -45,6 +47,14 @@ public final class ExchangeGUIMarketMenuLayoutTest {
             : "sell warehouse button must retain the native chest model";
         assert ExchangeGUI.functionalModelData(MarketMenuLayout.BUY_WAREHOUSE_NAME) == null
             : "buy warehouse button must retain the native chest model";
+
+        // 求购搜索会注册独立品种，不能沿用出售页的聚合分类过滤。
+        assert ExchangeGUI.shouldHideRegularCatalogItem(false, SpecialCategory.ARMOR_AND_TOOLS);
+        assert !ExchangeGUI.shouldHideRegularCatalogItem(true, SpecialCategory.ARMOR_AND_TOOLS);
+        assert !ExchangeGUI.shouldHideRegularCatalogItem(
+            true,
+            null
+        );
     }
 
     private static void assertPosition(int slot, int expectedRow, int expectedColumn, String label) {

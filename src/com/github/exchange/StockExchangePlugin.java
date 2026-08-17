@@ -47,6 +47,7 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Locale;
 import java.util.logging.Level;
 import net.milkbowl.vault.economy.Economy;
@@ -63,6 +64,7 @@ import org.bukkit.event.Listener;
 import org.bukkit.plugin.Plugin;
 import org.bukkit.plugin.RegisteredServiceProvider;
 import org.bukkit.plugin.java.JavaPlugin;
+import org.bukkit.configuration.ConfigurationSection;
 import org.geysermc.floodgate.api.FloodgateApi;
 import cn.gmzc.mail.MailService;
 
@@ -104,6 +106,8 @@ extends JavaPlugin {
     private String currencyName;
     private BukkitTask marketCleanupTask;
     private final List<String> announcements = new ArrayList<String>();
+    private final Map<String, Integer> announcementReads = new HashMap<String, Integer>();
+    private int announcementVersion;
     private MailService mailService;
     private WebMarketManager webMarketManager;
     private TradeNoticeBuffer tradeNoticeBuffer;
@@ -169,6 +173,7 @@ extends JavaPlugin {
         this.itemManager = new ItemManager(this);
         this.orderManager = new OrderManager(this);
         if (this.isStorageAvailable()) {
+            this.itemManager.repairUnserializableSlimefunCatalogItems();
             this.itemManager.normalizeCatalogDisplayNames();
             this.itemManager.ensureSpecialCategories();
             if (!this.matchSettlementJournal.hasPending()) {
@@ -334,6 +339,17 @@ extends JavaPlugin {
         }
         this.announcements.clear();
         this.announcements.addAll(this.getConfig().getStringList("announcements"));
+        this.announcementVersion = Math.max(
+            this.announcements.size(),
+            this.getConfig().getInt("announcement_version", this.announcements.size())
+        );
+        this.announcementReads.clear();
+        if (this.getConfig().isConfigurationSection("announcement_reads")) {
+            ConfigurationSection reads = this.getConfig().getConfigurationSection("announcement_reads");
+            for (String key : reads.getKeys(false)) {
+                this.announcementReads.put(key, reads.getInt(key, 0));
+            }
+        }
     }
 
     private double finiteConfig(String path, double fallback) {
@@ -371,6 +387,7 @@ extends JavaPlugin {
 
     public synchronized int addAnnouncement(String content) {
         this.announcements.add(content);
+        ++this.announcementVersion;
         this.saveAnnouncements();
         return this.announcements.size();
     }
@@ -397,7 +414,32 @@ extends JavaPlugin {
 
     private synchronized void saveAnnouncements() {
         this.getConfig().set("announcements", new ArrayList<String>(this.announcements));
+        this.getConfig().set("announcement_version", this.announcementVersion);
         this.saveConfig();
+    }
+
+
+    /** 是否有玩家尚未查看的新公告。 */
+    public synchronized boolean hasUnreadAnnouncements(Player player) {
+        if (this.announcements.isEmpty()) {
+            return false;
+        }
+        return this.announcementVersion > this.getAnnouncementReadVersion(player.getUniqueId());
+    }
+
+    /** 记录玩家已查看公告，用于主界面公告图标切换。 */
+    public synchronized void markAnnouncementsRead(Player player) {
+        if (player == null) {
+            return;
+        }
+        this.announcementReads.put(player.getUniqueId().toString(), this.announcementVersion);
+        this.getConfig().set("announcement_reads." + player.getUniqueId(), this.announcementVersion);
+        this.saveConfig();
+    }
+
+    private synchronized int getAnnouncementReadVersion(UUID uuid) {
+        Integer version = this.announcementReads.get(uuid.toString());
+        return version == null ? 0 : version;
     }
 
     public synchronized boolean reconnectStorage() {

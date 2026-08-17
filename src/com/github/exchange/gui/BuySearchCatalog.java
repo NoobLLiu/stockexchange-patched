@@ -16,21 +16,39 @@ import java.util.Map;
  */
 public final class BuySearchCatalog {
 
-    /** 单个可求购候选：来自原版物品库或市场已注册条目。 */
+    /** 单个可求购候选：来自原版物品库、市场已注册条目或黏液科技注册表。 */
     public static final class Source {
         public final String id;
         public final String displayName;
         public final String material;
         public final boolean catalog;
         public final ExchangeItem marketItem;
+        /** true 表示来自黏液科技注册表，点击时按 id 从 Slimefun 还原物品。 */
+        public final boolean slimefun;
         int score;
 
         public Source(String id, String displayName, String material, boolean catalog, ExchangeItem marketItem) {
+            this(id, displayName, material, catalog, marketItem, false);
+        }
+
+        public Source(
+            String id,
+            String displayName,
+            String material,
+            boolean catalog,
+            ExchangeItem marketItem,
+            boolean slimefun
+        ) {
             this.id = id;
             this.displayName = displayName;
             this.material = material;
             this.catalog = catalog;
             this.marketItem = marketItem;
+            this.slimefun = slimefun;
+        }
+
+        public static Source slimefun(String id, String displayName, String material) {
+            return new Source(id, displayName, material, false, null, true);
         }
     }
 
@@ -117,6 +135,9 @@ public final class BuySearchCatalog {
     }
 
     private static String keyMaterial(Source source) {
+        if (source.slimefun) {
+            return "sf!" + source.id;
+        }
         String material = source.material == null ? "" : source.material.toUpperCase(Locale.ROOT);
         return material.isEmpty() ? "?" + source.id : material;
     }

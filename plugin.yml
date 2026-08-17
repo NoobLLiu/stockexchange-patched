@@ -3,7 +3,7 @@ version: 1.0.7-gmzc
 main: com.github.exchange.StockExchangePlugin
 api-version: "1.21"
 depend: [Vault]
-softdepend: [floodgate, Geyser-Spigot, XConomy, MGActivitys, GMZCMail, GMZCTitles, Residence]
+softdepend: [floodgate, Geyser-Spigot, XConomy, MGActivitys, GMZCMail, GMZCTitles, Residence, Slimefun]
 author: Codex
 description: GMZC patched stock exchange plugin
 

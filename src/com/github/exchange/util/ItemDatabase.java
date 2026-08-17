@@ -108,11 +108,11 @@ public class ItemDatabase {
         }
         String materialName = entry.getId().toUpperCase();
         Material material = Material.getMaterial(materialName);
-        if (material != null) {
+        if (material != null && material.isItem()) {
             return material;
         }
         material = Material.matchMaterial(entry.getId());
-        if (material != null) {
+        if (material != null && material.isItem()) {
             return material;
         }
         return null;

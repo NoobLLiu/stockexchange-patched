@@ -53,6 +53,22 @@ public final class BuySearchCatalogTest {
         assert BuySearchCatalog.search("   ", vanilla, new ArrayList<BuySearchCatalog.Source>()).isEmpty();
         assert BuySearchCatalog.search("zzzqqq_nonsense", vanilla, new ArrayList<BuySearchCatalog.Source>()).isEmpty();
 
+
+        // 黏液科技物品同材质不互相顶掉，且不影响原版同材质条目
+        vanilla.clear();
+        vanilla.add(vanilla("furnace", "\u7194\u7089"));
+        catalog.clear();
+        catalog.add(BuySearchCatalog.Source.slimefun("COAL_GENERATOR", "\u7164\u70ad\u53d1\u7535\u673a", "FURNACE"));
+        catalog.add(BuySearchCatalog.Source.slimefun("LAVA_GENERATOR", "\u5ca9\u6d46\u53d1\u7535\u673a", "FURNACE"));
+        results = BuySearchCatalog.search("\u53d1\u7535\u673a", vanilla, catalog);
+        assert results.size() == 2;
+        results = BuySearchCatalog.search("\u7194\u7089", vanilla, catalog);
+        assert results.size() == 1;
+        assert "\u7194\u7089".equals(results.get(0).displayName);
+
+        // 菜单功能图标应使用资源包中约定的 search / announcement 模型。
+        assert Integer.valueOf(2400031).equals(ExchangeGUI.functionalModelData("\u00a7e\u641c\u7d22\u6dfb\u52a0"));
+        assert Integer.valueOf(2400027).equals(ExchangeGUI.functionalModelData("\u00a76\u516c\u544a\u680f"));
         System.out.println("PASSED BuySearchCatalogTest");
     }
 

@@ -14,6 +14,7 @@ import com.github.exchange.model.Order;
 import com.github.exchange.util.ItemSerializer;
 import com.github.exchange.util.ItemDisplayNames;
 import com.github.exchange.util.SpecialCategory;
+import com.github.exchange.util.SlimefunSearch;
 import java.math.BigDecimal;
 import java.sql.Timestamp;
 import java.time.LocalDate;
@@ -51,6 +52,44 @@ public class ItemManager {
             exchangeItem.setDisplayName(translatedName);
             exchangeItem.setItemName(translatedName);
             this.plugin.getStorageManager().updateExchangeItem(exchangeItem);
+        }
+    }
+
+    /**
+     * Repairs search-created Slimefun entries written by older builds. Those
+     * entries used a SlimefunItemStack subclass in YAML and cannot be restored
+     * through YamlConfiguration#getItemStack on later reads.
+     */
+    public void repairUnserializableSlimefunCatalogItems() {
+        if (!SlimefunSearch.available()) {
+            return;
+        }
+        int repaired = 0;
+        for (ExchangeItem exchangeItem : this.plugin.getStorageManager().getAllExchangeItems()) {
+            if (exchangeItem == null
+                || ItemSerializer.itemFromBase64(exchangeItem.getItemBase64()) != null) {
+                continue;
+            }
+            ItemStack recovered = SlimefunSearch.itemFromSerializedReference(
+                exchangeItem.getItemBase64()
+            );
+            if (recovered == null) {
+                continue;
+            }
+            String repairedBase64 = ItemSerializer.itemToBase64(recovered);
+            if (repairedBase64 == null) {
+                continue;
+            }
+            exchangeItem.setMaterial(recovered.getType().name());
+            exchangeItem.setNbtHash(ItemSerializer.calculateNbtHash(recovered));
+            exchangeItem.setItemBase64(repairedBase64);
+            this.plugin.getStorageManager().updateExchangeItem(exchangeItem);
+            repaired++;
+        }
+        if (repaired > 0) {
+            this.plugin.getLogger().info(
+                "[SlimefunSearch] Repaired " + repaired + " legacy Slimefun catalog entries."
+            );
         }
     }
 
@@ -192,9 +231,13 @@ public class ItemManager {
         if (this.plugin.isGrowthAccessRestricted(player)) {
             return new RegisterResult(false, false, null, this.plugin.growthAccessMessage(player));
         }
-        String material = item.getType().name();
-        String nbtHash = ItemSerializer.calculateNbtHash(item);
-        ExchangeItem existing = this.findEquivalentItem(item, material, nbtHash);
+        ItemStack catalogItem = ItemSerializer.copyAsPlainItemStack(item);
+        if (catalogItem == null) {
+            return new RegisterResult(false, false, null, "\u00a7c\u65e0\u6548\u7684\u7269\u54c1\u3002");
+        }
+        String material = catalogItem.getType().name();
+        String nbtHash = ItemSerializer.calculateNbtHash(catalogItem);
+        ExchangeItem existing = this.findEquivalentItem(catalogItem, material, nbtHash);
         if (existing != null) {
             return new RegisterResult(true, false, existing,
                 "\u00a7a\u8be5\u5546\u54c1\u5df2\u5728\u5e02\u573a\u76ee\u5f55\u4e2d\u3002");
@@ -208,7 +251,7 @@ public class ItemManager {
             }
         }
         ExchangeItem created = this.registerItemForBuyInternal(
-            item,
+            catalogItem,
             player.getUniqueId().toString(),
             player.getName()
         );

@@ -75,6 +75,24 @@ public class ItemSerializer {
         return normalized;
     }
 
+    /**
+     * Copies an item into Bukkit's base ItemStack type while retaining all item
+     * components. Third-party plugins may expose ItemStack subclasses that
+     * Bukkit's YAML serializer writes with the subclass name and cannot later
+     * restore as an ItemStack.
+     */
+    public static ItemStack copyAsPlainItemStack(ItemStack item) {
+        if (item == null || item.getType() == org.bukkit.Material.AIR) {
+            return null;
+        }
+        ItemStack plain = new ItemStack(item.getType(), 1);
+        ItemMeta meta = item.getItemMeta();
+        if (meta != null) {
+            plain.setItemMeta(meta);
+        }
+        return plain;
+    }
+
     public static boolean hasIdentityDataBeyondCustomName(ItemStack item) {
         if (item == null || item.getType() == org.bukkit.Material.AIR) {
             return false;

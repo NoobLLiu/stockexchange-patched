@@ -33,11 +33,12 @@ $xconomyJar = Get-ChildItem -LiteralPath $pluginRoot -Filter '*XConomy*.jar' -Fi
 $mgactivitysJar = Join-Path $devRoot 'local-plugins\mgactivitys\build\MGActivitys-1.0.0.jar'
 $gmzcmailJar = Join-Path $devRoot 'local-plugins\mail-system\build\GMZCMail-1.0.0.jar'
 $titleJar = Join-Path $devRoot 'local-plugins\title-system\build\GMZCTitles-1.0.0.jar'
+$slimefunJar = Get-ChildItem -LiteralPath $pluginRoot -Filter '*Slimefun-United.jar' -File | Select-Object -First 1 -ExpandProperty FullName
 $gsonJar = Join-Path $serverRoot 'libraries\com\google\code\gson\gson\2.13.2\gson-2.13.2.jar'
 $libraryJars = Get-ChildItem -LiteralPath (Join-Path $serverRoot 'libraries') -Recurse -Filter '*.jar' -File |
     ForEach-Object { $_.FullName }
 $compileEntries = @($paperApi)
-foreach ($jar in @($residenceJar, $vaultJar, $floodgateJar, $geyserJar, $xconomyJar, $mgactivitysJar, $gmzcmailJar, $titleJar, $gsonJar)) {
+foreach ($jar in @($residenceJar, $vaultJar, $floodgateJar, $geyserJar, $xconomyJar, $mgactivitysJar, $gmzcmailJar, $titleJar, $slimefunJar, $gsonJar)) {
     if (Test-Path -LiteralPath $jar) {
         $compileEntries += $jar
     }
