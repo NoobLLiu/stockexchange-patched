@@ -60,12 +60,16 @@ public final class MarketListingLayoutTest {
         warehouseSell.setSourceWarehouseId(UUID.randomUUID().toString());
         List<MarketListingLayout.Slot> warehouseSlots =
             MarketListingLayout.expand(warehouseSell, 64);
-        assert warehouseSlots.size() == 1
-            : "one physical warehouse order must occupy exactly one market slot";
+        assert warehouseSlots.size() == 3
+            : "warehouse stock must use the same valid-stack layout as player sell orders";
         assert warehouseSlots.get(0).order() == warehouseSell
             && warehouseSlots.get(0).amount() == 64
+            && warehouseSlots.get(1).order() == warehouseSell
+            && warehouseSlots.get(1).amount() == 64
+            && warehouseSlots.get(2).order() == warehouseSell
+            && warehouseSlots.get(2).amount() == 2
             && warehouseSell.getRemainingQty() == 130
-            : "the warehouse slot may cap its clickable stack while preserving real stock";
+            : "warehouse listing stacks must stay within Minecraft's display limit";
 
         List<Order> mixed = new ArrayList<Order>();
         for (int i = 0; i < 44; ++i) {
@@ -75,7 +79,7 @@ public final class MarketListingLayoutTest {
         assert MarketListingLayout.pageCount(
             MarketListingLayout.expand(mixed, 64),
             45
-        ) == 1 : "warehouse stock must count as one GUI slot for pagination";
+        ) == 2 : "warehouse stock must contribute every visible stack to pagination";
 
     }
 
