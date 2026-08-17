@@ -13,23 +13,30 @@ public class EscrowEntry {
     private BigDecimal amount;
     private String itemBase64;
     private int quantity;
+    private String sourceWarehouseId;
 
     public EscrowEntry() {
     }
 
     public EscrowEntry(int orderId, String playerUuid, AssetType assetType, BigDecimal amount, String itemBase64, int quantity) {
+        this(orderId, playerUuid, assetType, amount, itemBase64, quantity, null);
+    }
+
+    public EscrowEntry(int orderId, String playerUuid, AssetType assetType, BigDecimal amount, String itemBase64, int quantity, String sourceWarehouseId) {
         this.orderId = orderId;
         this.playerUuid = playerUuid;
         this.assetType = assetType;
         this.amount = amount;
         this.itemBase64 = itemBase64;
         this.quantity = quantity;
+        this.sourceWarehouseId = sourceWarehouseId;
     }
 
     public boolean isPersistable() {
         if (this.orderId <= 0
             || !this.isUuid(this.playerUuid)
-            || this.assetType == null) {
+            || this.assetType == null
+            || !this.isOptionalUuid(this.sourceWarehouseId)) {
             return false;
         }
         if (this.assetType == AssetType.MONEY) {
@@ -50,6 +57,10 @@ public class EscrowEntry {
         } catch (IllegalArgumentException exception) {
             return false;
         }
+    }
+
+    private boolean isOptionalUuid(String value) {
+        return value == null || this.isUuid(value);
     }
 
     public int getOrderId() {
@@ -98,6 +109,14 @@ public class EscrowEntry {
 
     public void setQuantity(int quantity) {
         this.quantity = quantity;
+    }
+
+    public String getSourceWarehouseId() {
+        return this.sourceWarehouseId;
+    }
+
+    public void setSourceWarehouseId(String sourceWarehouseId) {
+        this.sourceWarehouseId = sourceWarehouseId;
     }
 
     public static enum AssetType {

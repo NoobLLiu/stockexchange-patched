@@ -1202,7 +1202,18 @@ public class WebMarketManager {
             return fail("你有一笔交易操作正在进行，请稍后再试");
         }
         try {
-            return onMain(task);
+            return onMain(new Callable<Map<String, Object>>() {
+                @Override
+                public Map<String, Object> call() throws Exception {
+                    if (!plugin.isStorageAvailable()) {
+                        return fail("交易数据暂不可用，请稍后再试。");
+                    }
+                    if (plugin.isSettlementDeliveryBlocked()) {
+                        return fail("交易结算正在核验，仓库资产暂不可操作，请稍后再试。");
+                    }
+                    return task.call();
+                }
+            });
         } finally {
             lock.unlock();
             if (!lock.isLocked()) {

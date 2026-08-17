@@ -31,7 +31,9 @@ public class SettlementDeliveryListener implements Listener {
     }
 
     private void deliverPendingAssets(Player player) {
-        if (player == null || !player.isOnline()) {
+        if (player == null || !player.isOnline()
+            || !this.plugin.isStorageAvailable()
+            || this.plugin.isSettlementDeliveryBlocked()) {
             return;
         }
         StorageManager storage = this.plugin.getStorageManager();

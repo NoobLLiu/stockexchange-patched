@@ -212,7 +212,15 @@ implements StorageManager {
                 this.plugin.getLogger().severe("MySQL connection unavailable after reconnect attempt.");
                 return false;
             }
-            this.createTables();
+            try {
+                this.createTables();
+            }
+            catch (IllegalStateException exception) {
+                this.plugin.getLogger().severe(
+                    "MySQL schema verification failed after reconnect attempt."
+                );
+                return false;
+            }
             return true;
         }
     }
@@ -273,9 +281,11 @@ implements StorageManager {
             catch (SQLException sQLException) {
                 // empty catch block
             }
-            stmt.executeUpdate("CREATE TABLE IF NOT EXISTS orders (  id INT PRIMARY KEY AUTO_INCREMENT,  order_type VARCHAR(10) NOT NULL,  item_id INT NOT NULL,  player_uuid VARCHAR(36) NOT NULL,  player_name VARCHAR(32) DEFAULT '',  price DECIMAL(16,2) NOT NULL,  quantity INT NOT NULL,  filled_qty INT DEFAULT 0,  status VARCHAR(20) NOT NULL,  created_at BIGINT NOT NULL,  updated_at BIGINT NOT NULL,  KEY idx_item_status (item_id, status),  KEY idx_player (player_uuid)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+            stmt.executeUpdate("CREATE TABLE IF NOT EXISTS orders (  id INT PRIMARY KEY AUTO_INCREMENT,  order_type VARCHAR(10) NOT NULL,  item_id INT NOT NULL,  player_uuid VARCHAR(36) NOT NULL,  player_name VARCHAR(32) DEFAULT '',  source_warehouse_id VARCHAR(36) NULL,  price DECIMAL(16,2) NOT NULL,  quantity INT NOT NULL,  filled_qty INT DEFAULT 0,  status VARCHAR(20) NOT NULL,  created_at BIGINT NOT NULL,  updated_at BIGINT NOT NULL,  KEY idx_item_status (item_id, status),  KEY idx_player (player_uuid)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
             stmt.executeUpdate("CREATE TABLE IF NOT EXISTS trades (  id INT PRIMARY KEY AUTO_INCREMENT,  item_id INT NOT NULL,  buyer_uuid VARCHAR(36) NOT NULL,  seller_uuid VARCHAR(36) NOT NULL,  price DECIMAL(16,2) NOT NULL,  quantity INT NOT NULL,  total_amount DECIMAL(16,2) NOT NULL,  buyer_fee DECIMAL(16,2) DEFAULT 0,  seller_fee DECIMAL(16,2) DEFAULT 0,  buy_order_id INT DEFAULT 0,  sell_order_id INT DEFAULT 0,  traded_at BIGINT NOT NULL,  KEY idx_item (item_id),  KEY idx_buyer (buyer_uuid),  KEY idx_seller (seller_uuid)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
-            stmt.executeUpdate("CREATE TABLE IF NOT EXISTS escrow (  order_id INT NOT NULL,  player_uuid VARCHAR(36) NOT NULL,  asset_type VARCHAR(10) NOT NULL,  amount DECIMAL(16,2) DEFAULT 0,  item_base64 TEXT,  quantity INT DEFAULT 0,  PRIMARY KEY (order_id, asset_type)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+            stmt.executeUpdate("CREATE TABLE IF NOT EXISTS escrow (  order_id INT NOT NULL,  player_uuid VARCHAR(36) NOT NULL,  asset_type VARCHAR(10) NOT NULL,  source_warehouse_id VARCHAR(36) NULL,  amount DECIMAL(16,2) DEFAULT 0,  item_base64 TEXT,  quantity INT DEFAULT 0,  PRIMARY KEY (order_id, asset_type)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+            this.addNullableWarehouseSourceColumn(stmt, "orders");
+            this.addNullableWarehouseSourceColumn(stmt, "escrow");
             stmt.executeUpdate("CREATE TABLE IF NOT EXISTS item_status (  item_id INT PRIMARY KEY,  is_suspended BOOLEAN DEFAULT FALSE,  last_close DECIMAL(16,2) DEFAULT 0,  last_open DECIMAL(16,2) DEFAULT 0,  high_today DECIMAL(16,2) DEFAULT 0,  low_today DECIMAL(16,2) DEFAULT 0,  volume_today INT DEFAULT 0,  lowest_sell_current DECIMAL(16,2) DEFAULT 0,  lowest_sell_reference DECIMAL(16,2) DEFAULT 0,  lowest_sell_reference_at BIGINT DEFAULT 0,  lowest_sell_reference_7d DECIMAL(16,2) DEFAULT 0,  lowest_sell_reference_at_7d BIGINT DEFAULT 0,  lowest_sell_reference_30d DECIMAL(16,2) DEFAULT 0,  lowest_sell_reference_at_30d BIGINT DEFAULT 0) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
             try {
                 stmt.executeUpdate("ALTER TABLE item_status ADD COLUMN lowest_sell_current DECIMAL(16,2) DEFAULT 0");
@@ -326,7 +336,36 @@ implements StorageManager {
         }
         catch (SQLException e) {
             this.plugin.getLogger().severe("Failed to create tables: " + e.getMessage());
+            throw new IllegalStateException(
+                "Failed to create or migrate database schema",
+                e
+            );
         }
+    }
+
+    private void addNullableWarehouseSourceColumn(Statement statement, String table) throws SQLException {
+        try {
+            statement.executeUpdate("ALTER TABLE " + table + " ADD COLUMN source_warehouse_id VARCHAR(36) NULL");
+        } catch (SQLException exception) {
+            if (!this.isDuplicateColumn(exception)) {
+                this.plugin.getLogger().severe(
+                    "Failed to add source_warehouse_id to " + table
+                        + ": " + exception.getMessage()
+                        + " (SQLState=" + exception.getSQLState()
+                        + ", vendorCode=" + exception.getErrorCode() + ")"
+                );
+                throw exception;
+            }
+        }
+    }
+
+    private boolean isDuplicateColumn(SQLException exception) {
+        for (SQLException current = exception; current != null; current = current.getNextException()) {
+            if (current.getErrorCode() == 1060 || "42S21".equals(current.getSQLState())) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private void loadAllData() {
@@ -478,6 +517,7 @@ implements StorageManager {
             while (rs.next()) {
                 Order order = new Order(rs.getInt("id"), Order.OrderType.valueOf(rs.getString("order_type")), rs.getInt("item_id"), rs.getString("player_uuid"), rs.getBigDecimal("price"), rs.getInt("quantity"), rs.getInt("filled_qty"), Order.OrderStatus.valueOf(rs.getString("status")), new Timestamp(rs.getLong("created_at")), new Timestamp(rs.getLong("updated_at")));
                 order.setPlayerName(rs.getString("player_name"));
+                order.setSourceWarehouseId(rs.getString("source_warehouse_id"));
                 this.orderCache.put(order.getId(), order);
             }
         }
@@ -496,19 +536,20 @@ implements StorageManager {
         if (!this.prepareForOperation(false)) {
             return -1;
         }
-        String sql = "INSERT INTO orders (order_type, item_id, player_uuid, player_name, price, quantity, filled_qty, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+        String sql = "INSERT INTO orders (order_type, item_id, player_uuid, player_name, source_warehouse_id, price, quantity, filled_qty, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
         try (PreparedStatement ps = this.connection.prepareStatement(sql, 1);){
             ps.setString(1, order.getOrderType().name());
             ps.setInt(2, order.getItemId());
             ps.setString(3, order.getPlayerUuid());
             ps.setString(4, order.getPlayerName() != null ? order.getPlayerName() : "");
-            ps.setBigDecimal(5, order.getPrice());
-            ps.setInt(6, order.getQuantity());
-            ps.setInt(7, order.getFilledQty());
-            ps.setString(8, order.getStatus().name());
+            ps.setString(5, order.getSourceWarehouseId());
+            ps.setBigDecimal(6, order.getPrice());
+            ps.setInt(7, order.getQuantity());
+            ps.setInt(8, order.getFilledQty());
+            ps.setString(9, order.getStatus().name());
             long now = System.currentTimeMillis();
-            ps.setLong(9, order.getCreatedAt() != null ? order.getCreatedAt().getTime() : now);
-            ps.setLong(10, now);
+            ps.setLong(10, order.getCreatedAt() != null ? order.getCreatedAt().getTime() : now);
+            ps.setLong(11, now);
             ps.executeUpdate();
             ResultSet rs = ps.getGeneratedKeys();
             if (!rs.next()) return -1;
@@ -536,13 +577,14 @@ implements StorageManager {
         if (!this.prepareForOperation(false)) {
             return false;
         }
-        String sql = "UPDATE orders SET quantity=?, filled_qty=?, status=?, updated_at=? WHERE id=?";
+        String sql = "UPDATE orders SET quantity=?, filled_qty=?, status=?, source_warehouse_id=?, updated_at=? WHERE id=?";
         try (PreparedStatement ps = this.connection.prepareStatement(sql);){
             ps.setInt(1, order.getQuantity());
             ps.setInt(2, order.getFilledQty());
             ps.setString(3, order.getStatus().name());
-            ps.setLong(4, System.currentTimeMillis());
-            ps.setInt(5, order.getId());
+            ps.setString(4, order.getSourceWarehouseId());
+            ps.setLong(5, System.currentTimeMillis());
+            ps.setInt(6, order.getId());
             if (ps.executeUpdate() <= 0) {
                 return false;
             }
@@ -643,6 +685,23 @@ implements StorageManager {
             result.add(order);
         }
         result.sort((a, b) -> Long.compare(b.getCreatedAt().getTime(), a.getCreatedAt().getTime()));
+        return result;
+    }
+
+    @Override
+    public List<Order> getOrdersBySourceWarehouse(String sourceWarehouseId) {
+        ArrayList<Order> result = new ArrayList<Order>();
+        if (sourceWarehouseId == null || sourceWarehouseId.isBlank()
+            || !this.prepareForOperation(true)) {
+            return result;
+        }
+        for (Order order : this.orderCache.values()) {
+            if (order != null
+                && sourceWarehouseId.equals(order.getSourceWarehouseId())) {
+                result.add(order);
+            }
+        }
+        result.sort(Comparator.comparingInt(Order::getId));
         return result;
     }
 
@@ -835,6 +894,7 @@ implements StorageManager {
              ResultSet rs = stmt.executeQuery("SELECT * FROM escrow");){
             while (rs.next()) {
                 EscrowEntry entry = new EscrowEntry(rs.getInt("order_id"), rs.getString("player_uuid"), EscrowEntry.AssetType.valueOf(rs.getString("asset_type")), rs.getBigDecimal("amount"), rs.getString("item_base64"), rs.getInt("quantity"));
+                entry.setSourceWarehouseId(rs.getString("source_warehouse_id"));
                 this.escrowCache.put(this.escrowKey(entry.getOrderId(), entry.getAssetType()), entry);
             }
         }
@@ -855,14 +915,15 @@ implements StorageManager {
         if (!this.prepareForOperation(false)) {
             return false;
         }
-        String sql = "REPLACE INTO escrow (order_id, player_uuid, asset_type, amount, item_base64, quantity) VALUES (?, ?, ?, ?, ?, ?)";
+        String sql = "REPLACE INTO escrow (order_id, player_uuid, asset_type, source_warehouse_id, amount, item_base64, quantity) VALUES (?, ?, ?, ?, ?, ?, ?)";
         try (PreparedStatement ps = this.connection.prepareStatement(sql);){
             ps.setInt(1, entry.getOrderId());
             ps.setString(2, entry.getPlayerUuid());
             ps.setString(3, entry.getAssetType().name());
-            ps.setBigDecimal(4, entry.getAmount() != null ? entry.getAmount() : BigDecimal.ZERO);
-            ps.setString(5, entry.getItemBase64() != null ? entry.getItemBase64() : "");
-            ps.setInt(6, entry.getQuantity());
+            ps.setString(4, entry.getSourceWarehouseId());
+            ps.setBigDecimal(5, entry.getAmount() != null ? entry.getAmount() : BigDecimal.ZERO);
+            ps.setString(6, entry.getItemBase64() != null ? entry.getItemBase64() : "");
+            ps.setInt(7, entry.getQuantity());
             if (ps.executeUpdate() <= 0) {
                 return false;
             }
@@ -881,6 +942,24 @@ implements StorageManager {
             return null;
         }
         return this.escrowCache.get(this.escrowKey(orderId, assetType));
+    }
+
+    @Override
+    public List<EscrowEntry> getEscrowsBySourceWarehouse(String sourceWarehouseId) {
+        ArrayList<EscrowEntry> result = new ArrayList<EscrowEntry>();
+        if (sourceWarehouseId == null || sourceWarehouseId.isBlank()
+            || !this.prepareForOperation(true)) {
+            return result;
+        }
+        for (EscrowEntry entry : this.escrowCache.values()) {
+            if (entry != null
+                && sourceWarehouseId.equals(entry.getSourceWarehouseId())) {
+                result.add(entry);
+            }
+        }
+        result.sort(Comparator.comparingInt(EscrowEntry::getOrderId)
+            .thenComparing(entry -> entry.getAssetType().name()));
+        return result;
     }
 
     @Override
@@ -1374,8 +1453,15 @@ implements StorageManager {
 
     @Override
     public void withdrawWarehouse(Player player) {
+        if (player == null) {
+            return;
+        }
         if (!this.prepareForOperation(true)) {
             player.sendMessage("\u00a7c\u6570\u636e\u5e93\u6682\u4e0d\u53ef\u7528\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u3002");
+            return;
+        }
+        if (this.plugin.isSettlementDeliveryBlocked()) {
+            player.sendMessage("\u00a7c\u4ea4\u6613\u7ed3\u7b97\u6b63\u5728\u6838\u9a8c\uff0c\u4ed3\u5e93\u8d44\u4ea7\u6682\u4e0d\u53ef\u63d0\u53d6\u3002");
             return;
         }
         String playerUuid = player.getUniqueId().toString();
@@ -1437,6 +1523,10 @@ implements StorageManager {
             player.sendMessage("\u00a7c\u6570\u636e\u5e93\u6682\u4e0d\u53ef\u7528\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u3002");
             return;
         }
+        if (this.plugin.isSettlementDeliveryBlocked()) {
+            player.sendMessage("\u00a7c\u4ea4\u6613\u7ed3\u7b97\u6b63\u5728\u6838\u9a8c\uff0c\u4ed3\u5e93\u8d44\u4ea7\u6682\u4e0d\u53ef\u63d0\u53d6\u3002");
+            return;
+        }
         String playerUuid = player.getUniqueId().toString();
         BigDecimal moneyBalance = this.moneyWarehouseCache.getOrDefault(playerUuid, BigDecimal.ZERO);
         if (moneyBalance.compareTo(BigDecimal.ZERO) <= 0) {
@@ -1466,6 +1556,10 @@ implements StorageManager {
             if (player != null) {
                 player.sendMessage("\u00a7c\u6570\u636e\u5e93\u6682\u4e0d\u53ef\u7528\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u3002");
             }
+            return;
+        }
+        if (this.plugin.isSettlementDeliveryBlocked()) {
+            player.sendMessage("\u00a7c\u4ea4\u6613\u7ed3\u7b97\u6b63\u5728\u6838\u9a8c\uff0c\u4ed3\u5e93\u8d44\u4ea7\u6682\u4e0d\u53ef\u63d0\u53d6\u3002");
             return;
         }
         if (itemBase64 == null || itemBase64.isEmpty()) {

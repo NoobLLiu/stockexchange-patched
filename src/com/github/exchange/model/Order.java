@@ -19,11 +19,16 @@ public class Order {
     private OrderStatus status;
     private Timestamp createdAt;
     private Timestamp updatedAt;
+    private String sourceWarehouseId;
 
     public Order() {
     }
 
     public Order(int id, OrderType orderType, int itemId, String playerUuid, BigDecimal price, int quantity, int filledQty, OrderStatus status, Timestamp createdAt, Timestamp updatedAt) {
+        this(id, orderType, itemId, playerUuid, price, quantity, filledQty, status, createdAt, updatedAt, null);
+    }
+
+    public Order(int id, OrderType orderType, int itemId, String playerUuid, BigDecimal price, int quantity, int filledQty, OrderStatus status, Timestamp createdAt, Timestamp updatedAt, String sourceWarehouseId) {
         this.id = id;
         this.orderType = orderType;
         this.itemId = itemId;
@@ -34,6 +39,7 @@ public class Order {
         this.status = status;
         this.createdAt = createdAt;
         this.updatedAt = updatedAt;
+        this.sourceWarehouseId = sourceWarehouseId;
     }
 
     public int getRemainingQty() {
@@ -80,6 +86,21 @@ public class Order {
         }
         try {
             UUID.fromString(this.playerUuid);
+            return this.isValidOptionalUuid(this.sourceWarehouseId);
+        } catch (IllegalArgumentException exception) {
+            return false;
+        }
+    }
+
+    private boolean isValidOptionalUuid(String value) {
+        if (value == null) {
+            return true;
+        }
+        if (value.isBlank()) {
+            return false;
+        }
+        try {
+            UUID.fromString(value);
             return true;
         } catch (IllegalArgumentException exception) {
             return false;
@@ -172,6 +193,14 @@ public class Order {
 
     public void setUpdatedAt(Timestamp updatedAt) {
         this.updatedAt = updatedAt;
+    }
+
+    public String getSourceWarehouseId() {
+        return this.sourceWarehouseId;
+    }
+
+    public void setSourceWarehouseId(String sourceWarehouseId) {
+        this.sourceWarehouseId = sourceWarehouseId;
     }
 
     public static enum OrderStatus {

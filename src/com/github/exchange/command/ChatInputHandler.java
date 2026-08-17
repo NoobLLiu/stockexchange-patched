@@ -99,6 +99,39 @@ implements Listener {
         });
     }
 
+    public void startAutoSellWarehousePriceInput(Player player) {
+        if (player == null) {
+            return;
+        }
+        if (this.plugin.denyGrowthAccess(player)) {
+            this.plugin.getAutoWarehouseManager().cancelPendingSellConfiguration(player);
+            return;
+        }
+        if (this.plugin.isBedrockPlayer(player)) {
+            this.openBedrockAutoSellWarehousePriceForm(player);
+            return;
+        }
+        player.closeInventory();
+        anvilInputGUI.openInput(
+            player,
+            "\u00a7a\u8f93\u5165\u81ea\u52a8\u51fa\u552e\u5355\u4ef7",
+            String.valueOf(this.plugin.getPriceTick()),
+            priceText -> {
+                if (priceText == null || priceText.equalsIgnoreCase("cancel")) {
+                    this.cancelAutoSellWarehousePriceInput(player);
+                    return;
+                }
+                BigDecimal price = this.parsePrice(player, priceText);
+                if (price == null) {
+                    this.startAutoSellWarehousePriceInput(player);
+                    return;
+                }
+                this.plugin.getAutoWarehouseManager()
+                    .completePendingSellConfiguration(player, price);
+            }
+        );
+    }
+
     public void startMarketBuyInput(Player player, ExchangeItem exchangeItem) {
         if (this.plugin.denyGrowthAccess(player)) {
             return;
@@ -204,6 +237,40 @@ implements Listener {
                 }
             ));
         FloodgateApi.getInstance().sendForm(player.getUniqueId(), builder);
+    }
+
+    private void openBedrockAutoSellWarehousePriceForm(Player player) {
+        player.closeInventory();
+        CustomForm.Builder builder = CustomForm.builder()
+            .title("\u914d\u7f6e\u81ea\u52a8\u51fa\u552e\u4ed3\u5e93")
+            .input(
+                "\u5355\u4ef7\uff08\u6700\u5c0f\u5355\u4f4d: "
+                    + this.plugin.getPriceTick() + "\uff09",
+                "\u8bf7\u8f93\u5165\u6570\u5b57"
+            )
+            .validResultHandler(response -> Bukkit.getScheduler().runTask(this.plugin, () -> {
+                BigDecimal price = this.parsePrice(player, response.asInput(0));
+                if (price == null) {
+                    this.openBedrockAutoSellWarehousePriceForm(player);
+                    return;
+                }
+                this.plugin.getAutoWarehouseManager()
+                    .completePendingSellConfiguration(player, price);
+            }))
+            .closedResultHandler(() -> Bukkit.getScheduler().runTask(
+                this.plugin,
+                () -> this.cancelAutoSellWarehousePriceInput(player)
+            ));
+        if (!FloodgateApi.getInstance().sendForm(player.getUniqueId(), builder)) {
+            this.plugin.getAutoWarehouseManager()
+                .cancelPendingSellConfiguration(player);
+            player.sendMessage("\u00a7c\u65e0\u6cd5\u6253\u5f00\u57fa\u5ca9\u7248\u5355\u4ef7\u8f93\u5165\u9875\u9762\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u3002");
+        }
+    }
+
+    private void cancelAutoSellWarehousePriceInput(Player player) {
+        this.plugin.getAutoWarehouseManager().cancelPendingSellConfiguration(player);
+        player.sendMessage("\u00a7c\u81ea\u52a8\u51fa\u552e\u4ed3\u5e93\u914d\u7f6e\u5df2\u53d6\u6d88\u3002");
     }
 
     private void openBedrockMarketSearchForm(Player player) {

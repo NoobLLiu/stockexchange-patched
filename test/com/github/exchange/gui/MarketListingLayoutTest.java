@@ -6,6 +6,7 @@ import java.sql.Timestamp;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.UUID;
 
 public final class MarketListingLayoutTest {
     public static void main(String[] args) {
@@ -53,6 +54,28 @@ public final class MarketListingLayoutTest {
             && splitOrder.stream().map(MarketListingLayout.Slot::order).allMatch(order -> order == highEarlier)
             && splitOrder.stream().mapToInt(MarketListingLayout.Slot::amount).sum() == 130
             : "a BUY order must retain its order identity while splitting into valid display stacks";
+
+        Order warehouseSell = order(7, 130, 0);
+        warehouseSell.setOrderType(Order.OrderType.SELL);
+        warehouseSell.setSourceWarehouseId(UUID.randomUUID().toString());
+        List<MarketListingLayout.Slot> warehouseSlots =
+            MarketListingLayout.expand(warehouseSell, 64);
+        assert warehouseSlots.size() == 1
+            : "one physical warehouse order must occupy exactly one market slot";
+        assert warehouseSlots.get(0).order() == warehouseSell
+            && warehouseSlots.get(0).amount() == 64
+            && warehouseSell.getRemainingQty() == 130
+            : "the warehouse slot may cap its clickable stack while preserving real stock";
+
+        List<Order> mixed = new ArrayList<Order>();
+        for (int i = 0; i < 44; ++i) {
+            mixed.add(order(100 + i, 1, 0));
+        }
+        mixed.add(warehouseSell);
+        assert MarketListingLayout.pageCount(
+            MarketListingLayout.expand(mixed, 64),
+            45
+        ) == 1 : "warehouse stock must count as one GUI slot for pagination";
 
     }
 

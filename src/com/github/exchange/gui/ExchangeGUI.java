@@ -103,16 +103,21 @@ implements Listener {
     private static final String BACK_TO_PREVIOUS = "\u00a7f\u8fd4\u56de\u4e0a\u4e00\u9875";
     private static final String SELL_MODE_NAME = "\u00a7a\u51fa\u552e\u5546\u54c1";
     private static final String BUY_MODE_NAME = "\u00a7c\u6c42\u8d2d\u5546\u54c1";
+    static final String ITEM_LIST_SELL_WAREHOUSE_NAME = MarketMenuLayout.SELL_WAREHOUSE_NAME;
+    static final String ITEM_LIST_BUY_WAREHOUSE_NAME = MarketMenuLayout.BUY_WAREHOUSE_NAME;
     private static final int ADD_ITEM_INPUT_SLOT = 13;
     private static final int[] LISTING_DISPLAY_SLOTS = new int[]{9, 10, 11, 12, 13, 14, 15, 16, 17};
     private static final int LISTING_CONFIRM_SLOT = 18;
     private static final int LISTING_CANCEL_SLOT = 26;
-    private static final int ITEM_LIST_PAGE_SIZE = 36;
-    private static final int ITEM_LIST_SEPARATOR_START_SLOT = 36;
-    private static final int ITEM_LIST_SEPARATOR_END_SLOT = 43;
-    private static final int ITEM_LIST_ACTION_SLOT = 44;
-    private static final int ITEM_LIST_PREV_SLOT = 51;
-    private static final int ITEM_LIST_SEARCH_SLOT = 50;
+    static final int ITEM_LIST_PAGE_SIZE = MarketMenuLayout.ITEM_PAGE_SIZE;
+    static final int ITEM_LIST_SEPARATOR_START_SLOT = MarketMenuLayout.SEPARATOR_START_SLOT;
+    static final int ITEM_LIST_SEPARATOR_END_SLOT = MarketMenuLayout.SEPARATOR_END_SLOT;
+    static final int ITEM_LIST_PREV_SLOT = MarketMenuLayout.PREVIOUS_PAGE_SLOT;
+    static final int ITEM_LIST_NEXT_SLOT = MarketMenuLayout.NEXT_PAGE_SLOT;
+    static final int ITEM_LIST_SEARCH_SLOT = MarketMenuLayout.SEARCH_SLOT;
+    static final int ITEM_LIST_WAREHOUSE_SLOT = MarketMenuLayout.WAREHOUSE_SLOT;
+    static final int ITEM_LIST_ACTION_SLOT = MarketMenuLayout.ACTION_SLOT;
+    static final int ITEM_LIST_BACK_SLOT = MarketMenuLayout.BACK_SLOT;
     private static final int LARGE_PREV_SLOT = 45;
     private static final int LARGE_NEXT_SLOT = 52;
     private static final int LARGE_BACK_SLOT = 53;
@@ -619,7 +624,7 @@ implements Listener {
                     : "\u00a77\u641c\u7d22\u5173\u952e\u8bcd: \u00a7f" + ExchangeGUI.safeQueryForDisplay(query)
             ));
         }
-        // Keep the page-specific action at the end of the fifth row.
+        // Keep the page-specific action near the end of the sixth row.
         inv.setItem(ITEM_LIST_ACTION_SLOT, isBuy
             ? ExchangeGUI.createItem(
                 Material.EMERALD,
@@ -718,8 +723,21 @@ implements Listener {
                 : "\u00a77\u5f53\u524d\u5173\u952e\u8bcd: \u00a7f" + ExchangeGUI.safeQueryForDisplay(query),
             "\u00a77\u70b9\u51fb\u8f93\u5165\u65b0\u7684\u641c\u7d22\u5173\u952e\u8bcd"
         ));
-        inv.setItem(LARGE_BACK_SLOT, ExchangeGUI.createItem(Material.ARROW, BACK_TO_PREVIOUS, "\u00a77\u8fd4\u56de\u529f\u80fd\u4e3b\u83dc\u5355"));
-        inv.setItem(LARGE_NEXT_SLOT, ExchangeGUI.navigationItem(
+        inv.setItem(ITEM_LIST_WAREHOUSE_SLOT, modeIsBuy
+            ? ExchangeGUI.createItem(
+                Material.CHEST,
+                ITEM_LIST_BUY_WAREHOUSE_NAME,
+                "\u00a77\u7ad9\u5728\u7bb1\u5b50\u4e0a\u70b9\u51fb\uff0c\u5c06\u6c42\u8d2d\u5230\u7684\u7269\u54c1\u9001\u5165\u8be5\u7bb1\u5b50",
+                "\u00a77\u518d\u6b21\u64cd\u4f5c\u53ef\u53d6\u6d88\u4ed3\u5e93\u914d\u7f6e"
+            )
+            : ExchangeGUI.createItem(
+                Material.CHEST,
+                ITEM_LIST_SELL_WAREHOUSE_NAME,
+                "\u00a77\u7ad9\u5728\u7bb1\u5b50\u4e0a\u70b9\u51fb\uff0c\u8bbe\u7f6e\u7edf\u4e00\u51fa\u552e\u5355\u4ef7",
+                "\u00a77\u518d\u6b21\u64cd\u4f5c\u53ef\u53d6\u6d88\u4ed3\u5e93\u914d\u7f6e"
+            ));
+        inv.setItem(ITEM_LIST_BACK_SLOT, ExchangeGUI.createItem(Material.ARROW, BACK_TO_PREVIOUS, "\u00a77\u8fd4\u56de\u529f\u80fd\u4e3b\u83dc\u5355"));
+        inv.setItem(ITEM_LIST_NEXT_SLOT, ExchangeGUI.navigationItem(
             PAGE_NEXT,
             currentPage < totalPages,
             "\u00a77\u7b2c " + currentPage + "/" + totalPages + " \u9875"
@@ -1555,7 +1573,14 @@ implements Listener {
                     lore.add("\u00a77\u8be5\u5356\u5355\u5269\u4f59: \u00a7f" + sellOrder.getRemainingQty());
                     lore.add("");
                     boolean ownOrder = sellOrder.getPlayerUuid().equals(player.getUniqueId().toString());
-                    if (ownOrder) {
+                    boolean warehouseOrder = sellOrder.getOrderType() == Order.OrderType.SELL
+                        && sellOrder.getSourceWarehouseId() != null
+                        && !sellOrder.getSourceWarehouseId().isBlank();
+                    if (ownOrder && warehouseOrder) {
+                        meta.setEnchantmentGlintOverride(true);
+                        lore.add("\u00a7e\u8bf7\u76f4\u63a5\u4ece\u81ea\u52a8\u51fa\u552e\u4ed3\u5e93\u53d6\u8d70\u7269\u54c1");
+                        lore.add("\u00a7e\u53d6\u6d88\u4ed3\u5e93\u8bf7\u7ad9\u5728\u7bb1\u5b50\u4e0a\u518d\u6b21\u4f7f\u7528\u914d\u7f6e\u6309\u94ae");
+                    } else if (ownOrder) {
                         meta.setEnchantmentGlintOverride(true);
                         lore.add("\u00a7e\u5de6\u952e: \u53d6\u56de 1 \u4e2a");
                         lore.add("\u00a7eShift+\u5de6\u952e: \u53d6\u56de\u672c\u683c\u5168\u90e8\u5546\u54c1");
@@ -2005,6 +2030,14 @@ implements Listener {
                     ExchangeGUI.setBuyPage(plugin, clicker, !ExchangeGUI.isBuyPage(plugin, clicker));
                     guiNavigating.put(uuid, true);
                     ExchangeGUI.openItemList(plugin, clicker, guiPage.getOrDefault(uuid, 1));
+                    break;
+                }
+                if (event.getRawSlot() == ITEM_LIST_WAREHOUSE_SLOT && rawSlotIsTopInventory(event, 54)) {
+                    if (ExchangeGUI.isBuyPage(plugin, clicker)) {
+                        plugin.getAutoWarehouseManager().handleBuyConfigurationButton(clicker);
+                    } else {
+                        plugin.getAutoWarehouseManager().handleSellConfigurationButton(clicker);
+                    }
                     break;
                 }
                 if (event.getRawSlot() == ITEM_LIST_ACTION_SLOT && rawSlotIsTopInventory(event, 54)) {
@@ -2569,7 +2602,7 @@ implements Listener {
         if (lore != null && lore.length > 0 && lore[0] != null) {
             meta.setLore(Arrays.asList(lore));
         }
-        Integer customModelData = functionalModelData(name);
+        Integer customModelData = ExchangeGUI.functionalModelData(name);
         if (customModelData != null) {
             meta.setCustomModelData(customModelData);
         }
@@ -2613,7 +2646,7 @@ implements Listener {
         if (lore != null && lore.length > 0 && lore[0] != null) {
             meta.setLore(Arrays.asList(lore));
         }
-        Integer customModelData = functionalModelData(name);
+        Integer customModelData = ExchangeGUI.functionalModelData(name);
         if (customModelData != null) {
             meta.setCustomModelData(customModelData);
         }
@@ -2621,8 +2654,12 @@ implements Listener {
         return base;
     }
 
-    private static Integer functionalModelData(String displayName) {
+    static Integer functionalModelData(String displayName) {
         String name = ChatColor.stripColor(displayName == null ? "" : displayName);
+        if (name.equals(ChatColor.stripColor(ITEM_LIST_SELL_WAREHOUSE_NAME))
+            || name.equals(ChatColor.stripColor(ITEM_LIST_BUY_WAREHOUSE_NAME))) {
+            return null;
+        }
         if (name.contains("\u8fd4\u56de")) return 2400013;
         if (name.contains("\u4e0a\u4e00\u9875")) return 2400011;
         if (name.contains("\u4e0b\u4e00\u9875")) return 2400012;

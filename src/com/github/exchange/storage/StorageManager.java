@@ -66,7 +66,11 @@ public interface StorageManager {
 
     public EscrowEntry getEscrow(int var1, EscrowEntry.AssetType var2);
 
+    public List<EscrowEntry> getEscrowsBySourceWarehouse(String var1);
+
     public boolean deleteEscrow(int var1, EscrowEntry.AssetType var2);
+
+    public List<Order> getOrdersBySourceWarehouse(String var1);
 
     public void upsertItemStatus(ItemStatus var1);
 

@@ -31,12 +31,22 @@ public final class MarketListingLayout {
             return slots;
         }
         int remaining = order.getRemainingQty();
+        if (remaining > 0 && isWarehouseSellOrder(order)) {
+            slots.add(new Slot(order, Math.min(displayLimit, remaining)));
+            return slots;
+        }
         while (remaining > 0) {
             int amount = Math.min(displayLimit, remaining);
             slots.add(new Slot(order, amount));
             remaining -= amount;
         }
         return slots;
+    }
+
+    private static boolean isWarehouseSellOrder(Order order) {
+        return order.getOrderType() == Order.OrderType.SELL
+            && order.getSourceWarehouseId() != null
+            && !order.getSourceWarehouseId().isBlank();
     }
 
     public static List<Order> sortBuyOrders(List<Order> orders) {

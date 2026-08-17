@@ -13,6 +13,15 @@ $testSourcesList = Join-Path $buildRoot 'test-sources.txt'
 
 $paperApi = Join-Path $serverRoot 'libraries\io\papermc\paper\paper-api\1.21.11-R0.1-SNAPSHOT\paper-api-1.21.11-R0.1-SNAPSHOT.jar'
 $pluginRoot = Join-Path $serverRoot 'plugins'
+$residenceCandidates = @(Get-ChildItem -LiteralPath $pluginRoot -Filter '*.jar' -File |
+    Where-Object {
+        $_.Name -like '*Residence6.0.2.3.jar' -and
+        $_.Name -notmatch 'ResidenceList|ResidenceGuard'
+    })
+if ($residenceCandidates.Count -ne 1) {
+    throw "Expected exactly one Residence6.0.2.3 main JAR, found $($residenceCandidates.Count)"
+}
+$residenceJar = $residenceCandidates[0].FullName
 $vaultJar = Get-ChildItem -LiteralPath $pluginRoot -Filter '*Vault.jar' -File |
     Select-Object -First 1 -ExpandProperty FullName
 $floodgateJar = Get-ChildItem -LiteralPath $pluginRoot -Filter '*Floodgate-Spigot.jar' -File |
@@ -28,7 +37,7 @@ $gsonJar = Join-Path $serverRoot 'libraries\com\google\code\gson\gson\2.13.2\gso
 $libraryJars = Get-ChildItem -LiteralPath (Join-Path $serverRoot 'libraries') -Recurse -Filter '*.jar' -File |
     ForEach-Object { $_.FullName }
 $compileEntries = @($paperApi)
-foreach ($jar in @($vaultJar, $floodgateJar, $geyserJar, $xconomyJar, $mgactivitysJar, $gmzcmailJar, $titleJar, $gsonJar)) {
+foreach ($jar in @($residenceJar, $vaultJar, $floodgateJar, $geyserJar, $xconomyJar, $mgactivitysJar, $gmzcmailJar, $titleJar, $gsonJar)) {
     if (Test-Path -LiteralPath $jar) {
         $compileEntries += $jar
     }

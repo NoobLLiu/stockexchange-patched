@@ -269,6 +269,28 @@ public class ItemManager {
         return this.registerCatalogItem(playerUuid, playerName, item, admin, true);
     }
 
+    /**
+     * Registers stock discovered in a physical auto-sell warehouse.
+     *
+     * <p>Warehouse contents must be listable immediately, so this path does not
+     * consume or enforce the player's manual daily catalog-registration quota.
+     * All normal item, growth-access and catalog validation still runs through
+     * the shared registration implementation.</p>
+     */
+    public RegisterResult registerWarehouseCatalogItem(
+        String playerUuid,
+        String playerName,
+        ItemStack item
+    ) {
+        return this.registerCatalogItem(
+            playerUuid,
+            playerName,
+            item,
+            true,
+            true
+        );
+    }
+
     public RegisterResult registerCatalogItem(
         String playerUuid,
         String playerName,

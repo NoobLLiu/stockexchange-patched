@@ -29,13 +29,16 @@ import com.github.exchange.manager.OrderManager;
 import com.github.exchange.manager.SellBuyerTracker;
 import com.github.exchange.manager.TradeManager;
 import com.github.exchange.notify.TradeNoticeBuffer;
+import com.github.exchange.settlement.MatchSettlementJournal;
 import com.github.exchange.storage.FileStorageManager;
 import com.github.exchange.storage.MySQLStorageManager;
 import com.github.exchange.storage.StorageManager;
+import com.github.exchange.storage.UnavailableStorageManager;
 import com.github.exchange.util.EconomyUtil;
 import com.github.exchange.util.ItemDatabase;
 import com.github.exchange.util.ItemSerializer;
 import com.github.exchange.util.TaxCalculator;
+import com.github.exchange.warehouse.AutoWarehouseManager;
 import com.github.exchange.web.WebMarketManager;
 import java.math.BigDecimal;
 import java.io.File;
@@ -47,6 +50,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.logging.Level;
 import net.milkbowl.vault.economy.Economy;
+import org.bukkit.Bukkit;
 import org.bukkit.Material;
 import org.bukkit.entity.Player;
 import org.bukkit.inventory.ItemStack;
@@ -65,6 +69,8 @@ import cn.gmzc.mail.MailService;
 public class StockExchangePlugin
 extends JavaPlugin {
     private static StockExchangePlugin instance;
+    private static final StorageManager UNAVAILABLE_STORAGE =
+        new UnavailableStorageManager();
     private Economy economy;
     private VersionAdapter versionAdapter;
     private StorageManager storageManager;
@@ -74,8 +80,11 @@ extends JavaPlugin {
     private EscrowManager escrowManager;
     private SellBuyerTracker sellBuyerTracker;
     private ChatInputHandler chatInputHandler;
+    private AutoWarehouseManager autoWarehouseManager;
+    private MatchSettlementJournal matchSettlementJournal;
     private ItemDatabase itemDatabase;
-    private boolean storageAvailable = true;
+    private volatile boolean storageAvailable = true;
+    private volatile boolean storageIntegrityUncertain;
     private double priceTick;
     private double minPrice;
     private double maxPrice;
@@ -104,6 +113,41 @@ extends JavaPlugin {
         instance = this;
         this.saveDefaultConfig();
         this.loadConfigValues();
+        this.matchSettlementJournal = new MatchSettlementJournal(
+            new File(
+                this.getDataFolder(),
+                "match-settlement-journal.properties"
+            ).toPath()
+        );
+        try {
+            this.matchSettlementJournal.load();
+            if (!this.matchSettlementJournal.retryClearResolvedDecision()) {
+                this.getLogger().severe(
+                    "[AssetAudit] MATCHING_HALTED resolved_transaction_clear_failed reason="
+                        + this.matchSettlementJournal.lastFailure()
+                );
+            }
+        } catch (Exception exception) {
+            this.getLogger().log(
+                Level.SEVERE,
+                "Match settlement journal is unreadable; disabling StockExchange.",
+                exception
+            );
+            this.getServer().getPluginManager().disablePlugin((Plugin)this);
+            return;
+        }
+        MatchSettlementJournal.Entry pendingSettlement =
+            this.matchSettlementJournal.current();
+        if (pendingSettlement != null) {
+            this.getLogger().severe(
+                "[AssetAudit] MATCHING_HALTED pending_transaction="
+                    + pendingSettlement.id() + " buyOrder="
+                    + pendingSettlement.buyOrderId() + " sellOrder="
+                    + pendingSettlement.sellOrderId() + " decision="
+                    + pendingSettlement.decision() + " reason="
+                    + pendingSettlement.reason()
+            );
+        }
         if (!this.setupEconomy()) {
             this.getLogger().severe("Vault economy not found! Disabling plugin.");
             this.getServer().getPluginManager().disablePlugin((Plugin)this);
@@ -123,10 +167,23 @@ extends JavaPlugin {
             this.getLogger().log(Level.SEVERE, "Storage initialization exception", e);
         }
         this.itemManager = new ItemManager(this);
-        this.itemManager.normalizeCatalogDisplayNames();
-        this.itemManager.ensureSpecialCategories();
         this.orderManager = new OrderManager(this);
-        this.itemManager.mergeNameOnlyCatalogAliases();
+        if (this.isStorageAvailable()) {
+            this.itemManager.normalizeCatalogDisplayNames();
+            this.itemManager.ensureSpecialCategories();
+            if (!this.matchSettlementJournal.hasPending()) {
+                this.itemManager.mergeNameOnlyCatalogAliases();
+            } else {
+                this.getLogger().severe(
+                    "[AssetAudit] CATALOG_ORDER_MERGE_SKIPPED reason="
+                        + "pending_match_settlement"
+                );
+            }
+        } else {
+            this.getLogger().severe(
+                "[AssetAudit] CATALOG_MUTATION_SKIPPED reason=storage_unavailable"
+            );
+        }
         this.tradeManager = new TradeManager(this);
         this.escrowManager = new EscrowManager(this);
         this.sellBuyerTracker = new SellBuyerTracker(
@@ -136,6 +193,7 @@ extends JavaPlugin {
         this.sellBuyerTracker.load();
         this.tradeNoticeBuffer = new TradeNoticeBuffer(this);
         this.chatInputHandler = new ChatInputHandler(this);
+        this.autoWarehouseManager = new AutoWarehouseManager(this);
         this.itemDatabase = new ItemDatabase(this.getLogger());
         this.webMarketManager = new WebMarketManager(this);
         ExchangeCommand exchangeCmd = new ExchangeCommand(this);
@@ -159,7 +217,27 @@ extends JavaPlugin {
         this.chatInputHandler.registerEvents();
         this.getServer().getPluginManager().registerEvents((Listener)new ExchangeGUI(), (Plugin)this);
         this.getServer().getPluginManager().registerEvents((Listener)new SettlementDeliveryListener(this), (Plugin)this);
-        this.startCleanupTask();
+        this.getServer().getPluginManager().registerEvents((Listener)this.autoWarehouseManager, (Plugin)this);
+        if (this.isStorageAvailable()) {
+            try {
+                this.autoWarehouseManager.start();
+            } catch (RuntimeException exception) {
+                this.autoWarehouseManager.stopForStorageFailure();
+                this.storageAvailable = false;
+                this.getLogger().log(
+                    Level.SEVERE,
+                    "Auto warehouse initialization failed; StockExchange is in limited mode.",
+                    exception
+                );
+            }
+        } else {
+            this.getLogger().severe(
+                "[AssetAudit] AUTO_WAREHOUSE_START_SKIPPED reason=storage_unavailable"
+            );
+        }
+        if (this.isStorageAvailable()) {
+            this.startCleanupTask();
+        }
         this.getLogger().info("StockExchange v" + this.getDescription().getVersion() + " enabled!");
     }
 
@@ -170,6 +248,9 @@ extends JavaPlugin {
         if (this.marketCleanupTask != null) {
             this.marketCleanupTask.cancel();
             this.marketCleanupTask = null;
+        }
+        if (this.autoWarehouseManager != null) {
+            this.autoWarehouseManager.shutdown();
         }
         if (this.storageManager != null) {
             this.storageManager.shutdown();
@@ -278,7 +359,7 @@ extends JavaPlugin {
             this.marketCleanupTask.cancel();
         }
         this.marketCleanupTask = this.getServer().getScheduler().runTaskTimer(this, () -> {
-            if (this.itemManager != null) {
+            if (this.isStorageAvailable() && this.itemManager != null) {
                 this.itemManager.cleanupExpiredEmptyItems();
             }
         }, 20L * 60L, 20L * 60L);
@@ -320,7 +401,16 @@ extends JavaPlugin {
     }
 
     public synchronized boolean reconnectStorage() {
+        if (this.storageIntegrityUncertain) {
+            this.getLogger().severe(
+                "[AssetAudit] STORAGE_RECONNECT_BLOCKED reason=integrity_uncertain_restart_and_manual_review_required"
+            );
+            return false;
+        }
         String dbType = this.getConfig().getString("database.type", "FILE").toUpperCase(Locale.ROOT);
+        if (this.autoWarehouseManager != null) {
+            this.autoWarehouseManager.shutdown();
+        }
         try {
             if (this.storageManager != null) {
                 this.storageManager.shutdown();
@@ -328,7 +418,6 @@ extends JavaPlugin {
             this.storageManager = dbType.equals("MYSQL") ? new MySQLStorageManager(this) : new FileStorageManager(this);
             this.storageManager.init();
             this.storageAvailable = true;
-            return true;
         }
         catch (Exception e) {
             this.storageAvailable = false;
@@ -336,6 +425,20 @@ extends JavaPlugin {
             this.getLogger().log(Level.SEVERE, "Storage reconnect exception", e);
             return false;
         }
+        if (this.autoWarehouseManager != null) {
+            try {
+                this.autoWarehouseManager.start();
+            }
+            catch (RuntimeException e) {
+                this.autoWarehouseManager.shutdown();
+                this.storageAvailable = false;
+                this.getLogger().severe("Storage reconnected, but auto warehouse reload failed.");
+                this.getLogger().log(Level.SEVERE, "Auto warehouse reload exception", e);
+                return false;
+            }
+        }
+        this.startCleanupTask();
+        return true;
     }
 
     public static StockExchangePlugin getInstance() {
@@ -351,11 +454,56 @@ extends JavaPlugin {
     }
 
     public StorageManager getStorageManager() {
-        return this.storageManager;
+        return this.isStorageAvailable() && this.storageManager != null
+            ? this.storageManager
+            : UNAVAILABLE_STORAGE;
     }
 
     public boolean isStorageAvailable() {
         return this.storageAvailable;
+    }
+
+    public boolean isSettlementDeliveryBlocked() {
+        MatchSettlementJournal journal = this.matchSettlementJournal;
+        return journal != null && journal.hasPending();
+    }
+
+    public synchronized void markStorageUnavailable(
+        String reason,
+        Throwable cause
+    ) {
+        this.storageAvailable = false;
+        this.storageIntegrityUncertain = true;
+        if (this.marketCleanupTask != null) {
+            this.marketCleanupTask.cancel();
+            this.marketCleanupTask = null;
+        }
+        AutoWarehouseManager warehouseManager = this.autoWarehouseManager;
+        if (warehouseManager != null) {
+            if (Bukkit.isPrimaryThread()) {
+                warehouseManager.stopForStorageFailure();
+            } else {
+                Bukkit.getScheduler().runTask(this, () -> {
+                    if (!this.isStorageAvailable()) {
+                        warehouseManager.stopForStorageFailure();
+                    }
+                });
+            }
+        }
+        String detail = reason == null || reason.isBlank()
+            ? "asset storage state became uncertain"
+            : reason;
+        if (cause == null) {
+            this.getLogger().severe(
+                "[AssetAudit] STORAGE_DISABLED reason=" + detail
+            );
+        } else {
+            this.getLogger().log(
+                Level.SEVERE,
+                "[AssetAudit] STORAGE_DISABLED reason=" + detail,
+                cause
+            );
+        }
     }
 
     public ItemManager getItemManager() {
@@ -380,6 +528,14 @@ extends JavaPlugin {
 
     public ChatInputHandler getChatInputHandler() {
         return this.chatInputHandler;
+    }
+
+    public AutoWarehouseManager getAutoWarehouseManager() {
+        return this.autoWarehouseManager;
+    }
+
+    public MatchSettlementJournal getMatchSettlementJournal() {
+        return this.matchSettlementJournal;
     }
 
     public ItemDatabase getItemDatabase() {

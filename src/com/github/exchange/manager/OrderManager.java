@@ -13,6 +13,7 @@ import com.github.exchange.model.ExchangeItem;
 import com.github.exchange.model.ItemStatus;
 import com.github.exchange.model.Order;
 import com.github.exchange.model.Trade;
+import com.github.exchange.settlement.MatchSettlementJournal;
 import com.github.exchange.util.EconomyUtil;
 import com.github.exchange.util.InventoryDelivery;
 import com.github.exchange.util.ItemDisplayNames;
@@ -21,6 +22,8 @@ import com.github.exchange.util.BuyEscrowPolicy;
 import com.github.exchange.util.MarketGuiItem;
 import com.github.exchange.util.SpecialCategory;
 import com.github.exchange.util.TaxCalculator;
+import com.github.exchange.warehouse.AutoWarehouseManager;
+import com.github.exchange.warehouse.WarehouseOrderState;
 import java.math.BigDecimal;
 import java.sql.Timestamp;
 import java.util.ArrayList;
@@ -29,6 +32,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import java.util.UUID;
+import java.util.logging.Level;
 import org.bukkit.Bukkit;
 import org.bukkit.Material;
 import org.bukkit.entity.Player;
@@ -40,6 +44,257 @@ public class OrderManager {
 
     public OrderManager(StockExchangePlugin plugin) {
         this.plugin = plugin;
+    }
+
+    /**
+     * Creates a SELL order whose stock remains in a configured physical chest.
+     * No inventory or virtual-warehouse asset is removed here.
+     */
+    public synchronized int createWarehouseSellOrder(
+        String playerUuid,
+        String playerName,
+        ExchangeItem exchangeItem,
+        String itemBase64,
+        BigDecimal price,
+        int quantity,
+        String warehouseId
+    ) {
+        if (playerUuid == null || playerUuid.isBlank()
+            || playerName == null || exchangeItem == null
+            || itemBase64 == null || itemBase64.isBlank()
+            || warehouseId == null || warehouseId.isBlank()
+            || quantity <= 0 || !this.isPriceInConfiguredRange(price)
+            || !this.isValidPriceTick(price)
+            || ItemSerializer.itemFromBase64(itemBase64) == null) {
+            return -1;
+        }
+        try {
+            UUID.fromString(playerUuid);
+        } catch (IllegalArgumentException exception) {
+            return -1;
+        }
+        if (this.plugin.isGrowthAccessRestricted(playerUuid)) {
+            return -1;
+        }
+        ItemStatus status = this.plugin.getItemManager().getItemStatus(exchangeItem.getId());
+        if (status != null && status.isSuspended()) {
+            return -1;
+        }
+
+        Timestamp now = new Timestamp(System.currentTimeMillis());
+        Order order = new Order();
+        order.setOrderType(Order.OrderType.SELL);
+        order.setItemId(exchangeItem.getId());
+        order.setPlayerUuid(playerUuid);
+        order.setPlayerName(playerName);
+        order.setPrice(price);
+        order.setQuantity(quantity);
+        order.setFilledQty(0);
+        order.setStatus(Order.OrderStatus.OPEN);
+        order.setCreatedAt(now);
+        order.setUpdatedAt(now);
+        order.setSourceWarehouseId(warehouseId);
+        int orderId = this.plugin.getStorageManager().insertOrder(order);
+        if (orderId <= 0) {
+            return -1;
+        }
+        order.setId(orderId);
+
+        EscrowEntry escrow = new EscrowEntry();
+        escrow.setOrderId(orderId);
+        escrow.setPlayerUuid(playerUuid);
+        escrow.setAssetType(EscrowEntry.AssetType.ITEM);
+        escrow.setAmount(BigDecimal.ZERO);
+        escrow.setItemBase64(itemBase64);
+        escrow.setQuantity(quantity);
+        escrow.setSourceWarehouseId(warehouseId);
+        if (!this.plugin.getStorageManager().insertEscrow(escrow)) {
+            return this.abortWarehouseSellOrderCreation(
+                orderId,
+                warehouseId,
+                "item escrow creation failed"
+            );
+        }
+
+        AutoWarehouseManager warehouseManager = this.plugin.getAutoWarehouseManager();
+        if (warehouseManager == null
+            || !warehouseManager.bindSellOrder(warehouseId, itemBase64, orderId)) {
+            return this.abortWarehouseSellOrderCreation(
+                orderId,
+                warehouseId,
+                "physical warehouse link creation failed"
+            );
+        }
+
+        exchangeItem.setLastStockedAt(now);
+        exchangeItem.setLastSellCatalogActivityAt(now);
+        exchangeItem.setLastEmptyAt(null);
+        this.plugin.getStorageManager().updateExchangeItem(exchangeItem);
+        this.plugin.getLogger().info(
+            "[AssetAudit] WAREHOUSE_SELL_CREATE warehouse=" + warehouseId
+                + " player=" + playerUuid + " order=" + orderId
+                + " item=" + exchangeItem.getId() + " quantity=" + quantity
+        );
+        this.matchOrder(order);
+        this.refreshLowestSellStatus(exchangeItem.getId());
+        return orderId;
+    }
+
+    private int abortWarehouseSellOrderCreation(
+        int orderId,
+        String warehouseId,
+        String reason
+    ) {
+        if (this.cancelWarehouseSellOrder(orderId, warehouseId)) {
+            return -1;
+        }
+        IllegalStateException failure = new IllegalStateException(
+            "Unable to roll back warehouse order " + orderId + ": " + reason
+        );
+        this.plugin.markStorageUnavailable(
+            "warehouse order creation rollback failed",
+            failure
+        );
+        this.plugin.getLogger().log(
+            Level.SEVERE,
+            "[AssetAudit] WAREHOUSE_SELL_CREATE_ROLLBACK_FAILED order="
+                + orderId + " warehouse=" + warehouseId + " reason=" + reason,
+            failure
+        );
+        return -1;
+    }
+
+    /**
+     * Reconciles one physical warehouse order to the exact quantity still in
+     * the chest. The cumulative quantity remains filled + physical remainder.
+     */
+    public synchronized boolean resizeWarehouseSellOrder(
+        int orderId,
+        String warehouseId,
+        int physicalRemaining
+    ) {
+        if (orderId <= 0 || warehouseId == null || warehouseId.isBlank()
+            || physicalRemaining < 0) {
+            return false;
+        }
+        if (this.isSettlementLockedOrder(orderId)) {
+            return false;
+        }
+        if (physicalRemaining == 0) {
+            return this.cancelWarehouseSellOrder(orderId, warehouseId);
+        }
+        Order order = this.plugin.getStorageManager().getOrder(orderId);
+        EscrowEntry escrow = this.plugin.getStorageManager()
+            .getEscrow(orderId, EscrowEntry.AssetType.ITEM);
+        if (!this.isWarehouseSourceIdentity(order, escrow, warehouseId)
+            || !order.isActive()) {
+            return false;
+        }
+        int previousRemaining = order.getRemainingQty();
+        int totalQuantity;
+        try {
+            totalQuantity = WarehouseOrderState.totalQuantity(
+                order.getFilledQty(),
+                physicalRemaining
+            );
+        } catch (ArithmeticException | IllegalArgumentException exception) {
+            return false;
+        }
+        Order nextOrder = this.copyOrder(order);
+        nextOrder.setQuantity(totalQuantity);
+        nextOrder.setStatus(WarehouseOrderState.activeStatus(
+            order.getFilledQty(),
+            physicalRemaining
+        ));
+        EscrowEntry nextEscrow = this.copyEscrow(escrow);
+        nextEscrow.setQuantity(physicalRemaining);
+        if (!this.plugin.getStorageManager().updateOrder(nextOrder)) {
+            return false;
+        }
+        if (!this.plugin.getStorageManager().insertEscrow(nextEscrow)) {
+            this.plugin.getStorageManager().updateOrder(order);
+            return false;
+        }
+        this.plugin.getLogger().info(
+            "[AssetAudit] WAREHOUSE_SELL_RESIZE warehouse=" + warehouseId
+                + " order=" + orderId + " previous=" + previousRemaining
+                + " current=" + physicalRemaining
+        );
+        if (physicalRemaining > previousRemaining) {
+            this.matchOrder(nextOrder);
+        }
+        this.refreshLowestSellStatus(order.getItemId());
+        return true;
+    }
+
+    /**
+     * Stops a physical warehouse order without returning a synthetic escrow
+     * copy. The real items remain in the chest.
+     */
+    public synchronized boolean cancelWarehouseSellOrder(
+        int orderId,
+        String warehouseId
+    ) {
+        if (orderId <= 0 || warehouseId == null || warehouseId.isBlank()) {
+            return false;
+        }
+        if (this.isSettlementLockedOrder(orderId)) {
+            return false;
+        }
+        Order order = this.plugin.getStorageManager().getOrder(orderId);
+        EscrowEntry escrow = this.plugin.getStorageManager()
+            .getEscrow(orderId, EscrowEntry.AssetType.ITEM);
+        if (order == null) {
+            if (escrow != null
+                && !warehouseId.equals(escrow.getSourceWarehouseId())) {
+                return false;
+            }
+            if (escrow != null && !this.plugin.getStorageManager().deleteEscrow(
+                orderId,
+                EscrowEntry.AssetType.ITEM
+            )) {
+                return false;
+            }
+            AutoWarehouseManager manager = this.plugin.getAutoWarehouseManager();
+            if (manager != null) {
+                manager.unbindSellOrder(orderId);
+            }
+            return true;
+        }
+        if (!warehouseId.equals(order.getSourceWarehouseId())
+            || (escrow != null
+                && !warehouseId.equals(escrow.getSourceWarehouseId()))) {
+            return false;
+        }
+        if (order.isActive()) {
+            Order cancelled = this.copyOrder(order);
+            cancelled.setStatus(Order.OrderStatus.CANCELLED);
+            if (!this.plugin.getStorageManager().updateOrder(cancelled)) {
+                return false;
+            }
+            if (escrow != null && !this.plugin.getStorageManager().deleteEscrow(
+                orderId,
+                EscrowEntry.AssetType.ITEM
+            )) {
+                this.plugin.getStorageManager().updateOrder(order);
+                return false;
+            }
+        } else if (escrow != null && !this.plugin.getStorageManager().deleteEscrow(
+            orderId,
+            EscrowEntry.AssetType.ITEM
+        )) {
+            return false;
+        }
+        AutoWarehouseManager manager = this.plugin.getAutoWarehouseManager();
+        if (manager != null) {
+            manager.unbindSellOrder(orderId);
+        }
+        this.refreshLowestSellStatus(order.getItemId());
+        this.plugin.getLogger().info(
+            "[AssetAudit] WAREHOUSE_SELL_CANCEL warehouse=" + warehouseId
+                + " order=" + orderId + " physical_refund=0"
+        );
+        return true;
     }
 
     public synchronized String placeSellOrder(Player player, ExchangeItem exchangeItem, BigDecimal price, int quantity) {
@@ -381,7 +636,17 @@ public class OrderManager {
             this.abortBuyOrderCreation(buyOrder, chargedTotal);
             return "\u00a7c\u8d2d\u4e70\u8ba2\u5355\u6258\u7ba1\u5199\u5165\u5931\u8d25\uff0c\u5df2\u9000\u56de\u6263\u9664\u7684\u661f\u5149\u70b9\u3002";
         }
-        if (!this.executeMatch(buyOrder, sellOrder, quantity, false, true)) {
+        MatchOutcome matchOutcome = this.executeMatch(
+            buyOrder,
+            sellOrder,
+            quantity,
+            false,
+            true
+        );
+        if (matchOutcome != MatchOutcome.SUCCESS) {
+            if (matchOutcome == MatchOutcome.IN_DOUBT) {
+                return this.inDoubtMatchMessage(orderId, sellOrder.getId());
+            }
             String cancelResult = this.cancelOrder(player, orderId);
             return "\u00a7c\u4ea4\u6613\u672a\u5b8c\u6210\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u3002 " + cancelResult;
         }
@@ -440,7 +705,17 @@ public class OrderManager {
             + " sellOrder=" + sellOrder.getId() + " buyOrder=" + buyOrderId + " item=" + exchangeItem.getId()
             + " removed=" + (creation.removal == null ? quantity : creation.removal.removedQuantity())
             + " escrow=" + sellOrder.getRemainingQty());
-        if (!this.executeMatch(buyOrder, sellOrder, quantity, true, false)) {
+        MatchOutcome matchOutcome = this.executeMatch(
+            buyOrder,
+            sellOrder,
+            quantity,
+            true,
+            false
+        );
+        if (matchOutcome != MatchOutcome.SUCCESS) {
+            if (matchOutcome == MatchOutcome.IN_DOUBT) {
+                return this.inDoubtMatchMessage(buyOrder.getId(), sellOrder.getId());
+            }
             String cancelResult = this.cancelOrder(player, sellOrder.getId());
             return "\u00a7c\u4ea4\u6613\u672a\u5b8c\u6210\uff0c\u7269\u54c1\u672a\u6210\u4ea4\u3002 " + cancelResult;
         }
@@ -512,7 +787,20 @@ public class OrderManager {
                     + " item=" + exchangeItem.getId()
                     + " removed=" + (creation.removal == null ? chunk : creation.removal.removedQuantity())
                     + " escrow=" + creation.order.getRemainingQty());
-                if (!this.executeMatch(buyOrder, creation.order, chunk, true, false)) {
+                MatchOutcome matchOutcome = this.executeMatch(
+                    buyOrder,
+                    creation.order,
+                    chunk,
+                    true,
+                    false
+                );
+                if (matchOutcome != MatchOutcome.SUCCESS) {
+                    if (matchOutcome == MatchOutcome.IN_DOUBT) {
+                        return this.inDoubtMatchMessage(
+                            buyOrder.getId(),
+                            creation.order.getId()
+                        );
+                    }
                     String cancelResult = this.cancelOrder(player, creation.order.getId());
                     return supplied > 0
                         ? "\u00a7a\u5df2\u4f9b\u8d27 " + supplied + " \u4e2a\uff0c\u540e\u7eed\u4ea4\u6613\u672a\u5b8c\u6210\u3002 " + cancelResult
@@ -840,8 +1128,15 @@ public class OrderManager {
         if (!order.getPlayerUuid().equals(player.getUniqueId().toString()) && !player.hasPermission("exchange.admin")) {
             return "\u00a7c\u8fd9\u4e0d\u662f\u4f60\u7684\u8ba2\u5355\u3002";
         }
+        if (this.isSettlementLockedOrder(orderId)) {
+            return "§c该订单正处于资产核验锁定状态，暂时不能取消。请联系管理员处理。";
+        }
         if (!order.isActive()) {
             return "\u00a7c\u8ba2\u5355\u5df2\u7ed3\u675f\uff0c\u65e0\u6cd5\u53d6\u6d88\u3002";
+        }
+        if (order.getSourceWarehouseId() != null
+            && !order.getSourceWarehouseId().isBlank()) {
+            return "§c自动出售仓库挂单由箱内库存管理；请取走箱内物品，或站在该仓库上再次点击配置按钮取消。";
         }
         if (order.getOrderType() == Order.OrderType.SELL) {
             EscrowEntry escrow = this.plugin.getStorageManager().getEscrow(order.getId(), EscrowEntry.AssetType.ITEM);
@@ -897,8 +1192,15 @@ public class OrderManager {
         if (!order.getPlayerUuid().equals(player.getUniqueId().toString()) && !player.hasPermission("exchange.admin")) {
             return "\u00a7c\u8fd9\u4e0d\u662f\u4f60\u7684\u8ba2\u5355\u3002";
         }
+        if (this.isSettlementLockedOrder(orderId)) {
+            return "§c该订单正处于资产核验锁定状态，暂时不能取回。请联系管理员处理。";
+        }
         if (!order.isActive()) {
             return "\u00a7c\u8ba2\u5355\u5df2\u7ed3\u675f\uff0c\u65e0\u6cd5\u53d6\u56de\u3002";
+        }
+        if (order.getSourceWarehouseId() != null
+            && !order.getSourceWarehouseId().isBlank()) {
+            return "§c自动出售仓库挂单不能手动取回；请直接从对应箱子中取走物品。";
         }
         int remaining = order.getRemainingQty();
         if (remaining <= 0) {
@@ -1244,7 +1546,17 @@ public class OrderManager {
             this.plugin.getStorageManager().addToMoneyWarehouse(uuid, chargedTotal);
             return "\u00a7c\u8d2d\u4e70\u8ba2\u5355\u6258\u7ba1\u5199\u5165\u5931\u8d25\uff0c\u5df2\u9000\u56de\u4ed3\u5e93\u6263\u9664\u7684\u661f\u5149\u70b9\u3002";
         }
-        if (!this.executeMatch(buyOrder, sellOrder, quantity, false, true)) {
+        MatchOutcome matchOutcome = this.executeMatch(
+            buyOrder,
+            sellOrder,
+            quantity,
+            false,
+            true
+        );
+        if (matchOutcome != MatchOutcome.SUCCESS) {
+            if (matchOutcome == MatchOutcome.IN_DOUBT) {
+                return this.inDoubtMatchMessage(orderId, sellOrder.getId());
+            }
             String cancelResult = this.webCancel(uuid, false, orderId);
             return "\u00a7c\u4ea4\u6613\u672a\u5b8c\u6210\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u3002 " + cancelResult;
         }
@@ -1299,7 +1611,17 @@ public class OrderManager {
         this.plugin.getLogger().info("[WebMarket] SELL_TO_BUY player=" + uuid
             + " sellOrder=" + sellOrder.getId() + " buyOrder=" + buyOrderId
             + " item=" + exchangeItem.getId() + " removed=" + quantity);
-        if (!this.executeMatch(buyOrder, sellOrder, quantity, true, false)) {
+        MatchOutcome matchOutcome = this.executeMatch(
+            buyOrder,
+            sellOrder,
+            quantity,
+            true,
+            false
+        );
+        if (matchOutcome != MatchOutcome.SUCCESS) {
+            if (matchOutcome == MatchOutcome.IN_DOUBT) {
+                return this.inDoubtMatchMessage(buyOrder.getId(), sellOrder.getId());
+            }
             String cancelResult = this.webCancel(uuid, false, sellOrder.getId());
             return "\u00a7c\u4ea4\u6613\u672a\u5b8c\u6210\uff0c\u7269\u54c1\u672a\u6210\u4ea4\u3002 " + cancelResult;
         }
@@ -1358,7 +1680,20 @@ public class OrderManager {
                 this.plugin.getLogger().info("[WebMarket] SELL_TO_BUY player=" + uuid
                     + " sellOrder=" + creation.order().getId() + " buyOrder=" + buyOrder.getId()
                     + " item=" + exchangeItem.getId() + " removed=" + chunk);
-                if (!this.executeMatch(buyOrder, creation.order(), chunk, true, false)) {
+                MatchOutcome matchOutcome = this.executeMatch(
+                    buyOrder,
+                    creation.order(),
+                    chunk,
+                    true,
+                    false
+                );
+                if (matchOutcome != MatchOutcome.SUCCESS) {
+                    if (matchOutcome == MatchOutcome.IN_DOUBT) {
+                        return this.inDoubtMatchMessage(
+                            buyOrder.getId(),
+                            creation.order().getId()
+                        );
+                    }
                     String cancelResult = this.webCancel(uuid, false, creation.order().getId());
                     return supplied > 0
                         ? "\u00a7a\u5df2\u4f9b\u8d27 " + supplied + " \u4e2a\uff0c\u540e\u7eed\u4ea4\u6613\u672a\u5b8c\u6210\u3002 " + cancelResult
@@ -1509,8 +1844,15 @@ public class OrderManager {
         if (!order.getPlayerUuid().equals(uuid) && !admin) {
             return "\u00a7c\u8fd9\u4e0d\u662f\u4f60\u7684\u8ba2\u5355\u3002";
         }
+        if (this.isSettlementLockedOrder(orderId)) {
+            return "§c该订单正处于资产核验锁定状态，暂时不能从网页撤销。";
+        }
         if (!order.isActive()) {
             return "\u00a7c\u8ba2\u5355\u5df2\u7ed3\u675f\uff0c\u65e0\u6cd5\u53d6\u6d88\u3002";
+        }
+        if (order.getSourceWarehouseId() != null
+            && !order.getSourceWarehouseId().isBlank()) {
+            return "§c自动出售仓库挂单不能从网页撤销；请在游戏内操作对应实体仓库。";
         }
         String owner = order.getPlayerUuid();
         if (order.getOrderType() == Order.OrderType.SELL) {
@@ -1592,8 +1934,15 @@ public class OrderManager {
         if (!order.getPlayerUuid().equals(uuid) && !admin) {
             return "\u00a7c\u8fd9\u4e0d\u662f\u4f60\u7684\u8ba2\u5355\u3002";
         }
+        if (this.isSettlementLockedOrder(orderId)) {
+            return "§c该订单正处于资产核验锁定状态，暂时不能从网页取回。";
+        }
         if (!order.isActive()) {
             return "\u00a7c\u8ba2\u5355\u5df2\u7ed3\u675f\uff0c\u65e0\u6cd5\u53d6\u56de\u3002";
+        }
+        if (order.getSourceWarehouseId() != null
+            && !order.getSourceWarehouseId().isBlank()) {
+            return "§c自动出售仓库挂单不能从网页取回；请直接从对应箱子中取走物品。";
         }
         int remaining = order.getRemainingQty();
         if (remaining <= 0) {
@@ -1703,6 +2052,11 @@ public class OrderManager {
         if (newOrder == null || !newOrder.isActive()) {
             return;
         }
+        MatchSettlementJournal settlementJournal =
+            this.plugin.getMatchSettlementJournal();
+        if (settlementJournal == null || settlementJournal.hasPending()) {
+            return;
+        }
         if (newOrder.getOrderType() == Order.OrderType.BUY) {
             List<Order> sellOrders = this.plugin.getStorageManager().getActiveOrdersByItem(newOrder.getItemId(), Order.OrderType.SELL);
             for (Order sellOrder : sellOrders) {
@@ -1723,7 +2077,10 @@ public class OrderManager {
                 if (matchQty <= 0) {
                     continue;
                 }
-                this.executeMatch(newOrder, sellOrder, matchQty);
+                if (this.executeMatch(newOrder, sellOrder, matchQty)
+                    == MatchOutcome.IN_DOUBT) {
+                    return;
+                }
             }
         } else {
             List<Order> buyOrders = this.plugin.getStorageManager().getActiveOrdersByItem(newOrder.getItemId(), Order.OrderType.BUY);
@@ -1745,16 +2102,19 @@ public class OrderManager {
                 if (matchQty <= 0) {
                     continue;
                 }
-                this.executeMatch(buyOrder, newOrder, matchQty);
+                if (this.executeMatch(buyOrder, newOrder, matchQty)
+                    == MatchOutcome.IN_DOUBT) {
+                    return;
+                }
             }
         }
     }
 
-    private boolean executeMatch(Order buyOrder, Order sellOrder, int quantity) {
+    private MatchOutcome executeMatch(Order buyOrder, Order sellOrder, int quantity) {
         return this.executeMatch(buyOrder, sellOrder, quantity, true, true);
     }
 
-    private boolean executeMatch(
+    private MatchOutcome executeMatch(
         Order buyOrder,
         Order sellOrder,
         int quantity,
@@ -1774,12 +2134,42 @@ public class OrderManager {
             || sellOrder.getPrice() == null
             || buyOrder.getPrice().compareTo(BigDecimal.ZERO) <= 0
             || sellOrder.getPrice().compareTo(BigDecimal.ZERO) <= 0) {
-            return false;
+            return MatchOutcome.CLEAN_FAILURE;
         }
         if (this.isSamePlayer(buyOrder, sellOrder)) {
             this.plugin.getLogger().warning("[AssetAudit] MATCH_BLOCKED buyOrder=" + buyOrder.getId()
                 + " sellOrder=" + sellOrder.getId() + " reason=self_trade");
-            return false;
+            return MatchOutcome.CLEAN_FAILURE;
+        }
+        MatchSettlementJournal settlementJournal =
+            this.plugin.getMatchSettlementJournal();
+        if (settlementJournal == null) {
+            this.plugin.getLogger().severe(
+                "[AssetAudit] MATCH_BLOCKED buyOrder=" + buyOrder.getId()
+                    + " sellOrder=" + sellOrder.getId()
+                    + " reason=settlement_journal_unavailable"
+            );
+            return MatchOutcome.CLEAN_FAILURE;
+        }
+        if (settlementJournal.hasPending()) {
+            MatchSettlementJournal.Entry pending = settlementJournal.current();
+            this.plugin.getLogger().severe(
+                "[AssetAudit] MATCH_BLOCKED buyOrder=" + buyOrder.getId()
+                    + " sellOrder=" + sellOrder.getId()
+                    + " reason=global_settlement_pending transaction="
+                    + (pending == null ? "unknown" : pending.id())
+            );
+            return MatchOutcome.CLEAN_FAILURE;
+        }
+        AutoWarehouseManager warehouseManager = this.plugin.getAutoWarehouseManager();
+        if (this.isSettlementLockedOrder(buyOrder.getId())
+            || this.isSettlementLockedOrder(sellOrder.getId())) {
+            this.plugin.getLogger().severe(
+                "[AssetAudit] MATCH_BLOCKED buyOrder=" + buyOrder.getId()
+                    + " sellOrder=" + sellOrder.getId()
+                    + " reason=in_doubt_order_locked"
+            );
+            return MatchOutcome.CLEAN_FAILURE;
         }
         EscrowEntry buyerEscrow = this.plugin.getStorageManager()
             .getEscrow(buyOrder.getId(), EscrowEntry.AssetType.MONEY);
@@ -1793,14 +2183,14 @@ public class OrderManager {
             this.plugin.getLogger().severe("[AssetAudit] MATCH_BLOCKED buyOrder=" + buyOrder.getId()
                 + " sellOrder=" + sellOrder.getId() + " quantity=" + quantity
                 + " reason=escrow_verification_failed");
-            return false;
+            return MatchOutcome.CLEAN_FAILURE;
         }
         String deliveredItemBase64 = sellerEscrow.getItemBase64();
         if (deliveredItemBase64 == null || deliveredItemBase64.isEmpty()
             || ItemSerializer.itemFromBase64(deliveredItemBase64) == null) {
             this.plugin.getLogger().severe("[AssetAudit] MATCH_BLOCKED buyOrder=" + buyOrder.getId()
                 + " sellOrder=" + sellOrder.getId() + " reason=item_deserialization_failed");
-            return false;
+            return MatchOutcome.CLEAN_FAILURE;
         }
 
         BigDecimal lowestSellBeforeTrade = this.getLowestSellPrice(buyOrder.getItemId());
@@ -1820,126 +2210,491 @@ public class OrderManager {
         catch (IllegalArgumentException ex) {
             this.plugin.getLogger().severe("[AssetAudit] MATCH_BLOCKED buyOrder=" + buyOrder.getId()
                 + " sellOrder=" + sellOrder.getId() + " reason=invalid_player_uuid");
-            return false;
+            return MatchOutcome.CLEAN_FAILURE;
         }
 
-        EscrowEntry nextBuyerEscrow = this.copyEscrow(buyerEscrow);
-        nextBuyerEscrow.setAmount(
-            buyerEscrow.getAmount().subtract(matchedMoney.add(buyerFee))
-        );
-        EscrowEntry nextSellerEscrow = this.copyEscrow(sellerEscrow);
-        nextSellerEscrow.setQuantity(sellerEscrow.getQuantity() - quantity);
-        if (!this.writeEscrowState(buyerEscrow, nextBuyerEscrow)
-            || !this.writeEscrowState(sellerEscrow, nextSellerEscrow)) {
-            this.restoreEscrowState(buyerEscrow);
-            this.restoreEscrowState(sellerEscrow);
-            this.plugin.getLogger().severe("[AssetAudit] MATCH_ABORT buyOrder=" + buyOrder.getId()
-                + " sellOrder=" + sellOrder.getId() + " reason=escrow_update_failed");
-            return false;
+        MatchSettlementJournal.PrepareResult journalPrepare =
+            settlementJournal.prepare(buyOrder.getId(), sellOrder.getId());
+        if (!journalPrepare.prepared()) {
+            this.plugin.getLogger().severe(
+                "[AssetAudit] MATCH_JOURNAL_PREPARE_FAILED buyOrder="
+                    + buyOrder.getId() + " sellOrder=" + sellOrder.getId()
+                    + " status=" + journalPrepare.status() + " reason="
+                    + journalPrepare.reason()
+            );
+            return journalPrepare.status()
+                == MatchSettlementJournal.PrepareStatus.SAVE_FAILED
+                ? MatchOutcome.IN_DOUBT
+                : MatchOutcome.CLEAN_FAILURE;
         }
-
-        Order previousBuyOrder = this.copyOrder(buyOrder);
-        Order previousSellOrder = this.copyOrder(sellOrder);
-        Order settledBuyOrder = this.copyOrder(buyOrder);
-        Order settledSellOrder = this.copyOrder(sellOrder);
-        settledBuyOrder.setFilledQty(buyOrder.getFilledQty() + quantity);
-        settledSellOrder.setFilledQty(sellOrder.getFilledQty() + quantity);
-        settledBuyOrder.setStatus(settledBuyOrder.getFilledQty() >= settledBuyOrder.getQuantity()
-            ? Order.OrderStatus.CLOSED : Order.OrderStatus.PARTIAL);
-        settledSellOrder.setStatus(settledSellOrder.getFilledQty() >= settledSellOrder.getQuantity()
-            ? Order.OrderStatus.CLOSED : Order.OrderStatus.PARTIAL);
-
-        BigDecimal releasedReserve = BigDecimal.ZERO;
-        if (settledBuyOrder.getStatus() == Order.OrderStatus.CLOSED
-            && nextBuyerEscrow.getAmount().compareTo(BigDecimal.ZERO) > 0) {
-            releasedReserve = nextBuyerEscrow.getAmount();
-            boolean reserveAdded = this.plugin.getStorageManager()
-                .addToMoneyWarehouse(buyOrder.getPlayerUuid(), releasedReserve);
-            boolean escrowDeleted = reserveAdded
-                && this.plugin.getStorageManager().deleteEscrow(
-                    buyOrder.getId(), EscrowEntry.AssetType.MONEY);
-            if (!escrowDeleted) {
-                if (reserveAdded && !this.plugin.getStorageManager()
-                    .takeFromMoneyWarehouse(buyOrder.getPlayerUuid(), releasedReserve)) {
-                    this.plugin.getLogger().severe("[AssetAudit] RESERVE_RELEASE_ROLLBACK_FAILED buyOrder="
-                        + buyOrder.getId() + " amount=" + releasedReserve);
-                }
-                this.restoreEscrowState(buyerEscrow);
-                this.restoreEscrowState(sellerEscrow);
-                this.plugin.getLogger().severe("[AssetAudit] MATCH_ABORT buyOrder=" + buyOrder.getId()
-                    + " sellOrder=" + sellOrder.getId() + " reason=reserve_release_failed");
-                return false;
+        MatchSettlementJournal.Entry settlement = journalPrepare.entry();
+        AutoWarehouseManager.SaleReservation physicalReservation;
+        if (sellOrder.getSourceWarehouseId() == null
+            || sellOrder.getSourceWarehouseId().isBlank()) {
+            physicalReservation = AutoWarehouseManager.SaleReservation.notWarehouse();
+        } else if (warehouseManager == null) {
+            physicalReservation = AutoWarehouseManager.SaleReservation.blocked();
+        } else {
+            physicalReservation = warehouseManager.reserveSale(
+                buyOrder,
+                sellOrder,
+                sellerEscrow,
+                quantity
+            );
+        }
+        if (!physicalReservation.allowed()) {
+            boolean physicalResultUnknown = warehouseManager != null
+                && (warehouseManager.isSettlementLockedOrder(buyOrder.getId())
+                    || warehouseManager.isSettlementLockedOrder(
+                        sellOrder.getId()
+                    ));
+            if (physicalResultUnknown) {
+                return this.markSettlementInDoubt(
+                    settlement,
+                    physicalReservation,
+                    "physical sale reservation result unknown"
+                );
             }
-        }
-
-        if (!this.plugin.getStorageManager().updateOrder(settledBuyOrder)
-            || !this.plugin.getStorageManager().updateOrder(settledSellOrder)) {
-            this.rollbackMatchState(
-                previousBuyOrder, previousSellOrder, buyerEscrow, sellerEscrow,
-                releasedReserve, null, null
+            return this.finishFailedMatch(
+                settlement,
+                physicalReservation,
+                true,
+                "physical sale reservation rejected before mutation"
             );
-            this.plugin.getLogger().severe("[AssetAudit] MATCH_ABORT buyOrder=" + buyOrder.getId()
-                + " sellOrder=" + sellOrder.getId() + " reason=order_update_failed");
-            return false;
         }
-
-        Trade trade = this.recordTrade(buyOrder.getItemId(), buyOrder.getPlayerUuid(),
-            sellOrder.getPlayerUuid(), tradePrice, quantity, totalAmount, buyerFee, sellerFee,
-            buyOrder.getId(), sellOrder.getId());
-        if (trade == null) {
-            this.rollbackMatchState(
-                previousBuyOrder, previousSellOrder, buyerEscrow, sellerEscrow,
-                releasedReserve, null, null
-            );
-            this.plugin.getLogger().severe("[AssetAudit] MATCH_ABORT buyOrder=" + buyOrder.getId()
-                + " sellOrder=" + sellOrder.getId() + " reason=trade_record_failed");
-            return false;
-        }
-
-        MoneyDeliveryReceipt moneyDelivery = null;
+        boolean buyerDeliveryCompleted = false;
+        boolean committedSettlement = false;
         try {
-            moneyDelivery = this.deliverMatchedMoney(sellerUuid, sellerReceives);
-            if (moneyDelivery == null || !this.deliverMatchedItems(buyerUuid, deliveredItemBase64, quantity)) {
-                this.rollbackMatchState(
+            EscrowEntry nextBuyerEscrow = this.copyEscrow(buyerEscrow);
+            nextBuyerEscrow.setAmount(
+                buyerEscrow.getAmount().subtract(matchedMoney.add(buyerFee))
+            );
+            EscrowEntry nextSellerEscrow = this.copyEscrow(sellerEscrow);
+            nextSellerEscrow.setQuantity(sellerEscrow.getQuantity() - quantity);
+            boolean buyerEscrowWritten =
+                this.writeEscrowState(buyerEscrow, nextBuyerEscrow);
+            boolean sellerEscrowWritten = buyerEscrowWritten
+                && this.writeEscrowState(sellerEscrow, nextSellerEscrow);
+            if (!buyerEscrowWritten || !sellerEscrowWritten) {
+                boolean restored = this.restoreEscrowState(buyerEscrow)
+                    & this.restoreEscrowState(sellerEscrow);
+                this.plugin.getLogger().severe("[AssetAudit] MATCH_ABORT buyOrder=" + buyOrder.getId()
+                    + " sellOrder=" + sellOrder.getId() + " reason=escrow_update_failed");
+                return this.finishFailedMatch(
+                    settlement,
+                    physicalReservation,
+                    restored,
+                    "escrow update rollback incomplete"
+                );
+            }
+
+            Order previousBuyOrder = this.copyOrder(buyOrder);
+            Order previousSellOrder = this.copyOrder(sellOrder);
+            Order settledBuyOrder = this.copyOrder(buyOrder);
+            Order settledSellOrder = this.copyOrder(sellOrder);
+            settledBuyOrder.setFilledQty(buyOrder.getFilledQty() + quantity);
+            settledSellOrder.setFilledQty(sellOrder.getFilledQty() + quantity);
+            settledBuyOrder.setStatus(settledBuyOrder.getFilledQty() >= settledBuyOrder.getQuantity()
+                ? Order.OrderStatus.CLOSED : Order.OrderStatus.PARTIAL);
+            settledSellOrder.setStatus(settledSellOrder.getFilledQty() >= settledSellOrder.getQuantity()
+                ? Order.OrderStatus.CLOSED : Order.OrderStatus.PARTIAL);
+
+            BigDecimal releasedReserve = BigDecimal.ZERO;
+            if (settledBuyOrder.getStatus() == Order.OrderStatus.CLOSED
+                && nextBuyerEscrow.getAmount().compareTo(BigDecimal.ZERO) > 0) {
+                releasedReserve = nextBuyerEscrow.getAmount();
+                boolean reserveAdded = this.plugin.getStorageManager()
+                    .addToMoneyWarehouse(buyOrder.getPlayerUuid(), releasedReserve);
+                boolean escrowDeleted = reserveAdded
+                    && this.plugin.getStorageManager().deleteEscrow(
+                        buyOrder.getId(), EscrowEntry.AssetType.MONEY);
+                if (!escrowDeleted) {
+                    boolean reserveRestored = !reserveAdded
+                        || this.plugin.getStorageManager().takeFromMoneyWarehouse(
+                            buyOrder.getPlayerUuid(),
+                            releasedReserve
+                        );
+                    if (!reserveRestored) {
+                        this.plugin.getLogger().severe("[AssetAudit] RESERVE_RELEASE_ROLLBACK_FAILED buyOrder="
+                            + buyOrder.getId() + " amount=" + releasedReserve);
+                    }
+                    boolean restored = reserveRestored
+                        & this.restoreEscrowState(buyerEscrow)
+                        & this.restoreEscrowState(sellerEscrow);
+                    this.plugin.getLogger().severe("[AssetAudit] MATCH_ABORT buyOrder=" + buyOrder.getId()
+                        + " sellOrder=" + sellOrder.getId() + " reason=reserve_release_failed");
+                    return this.finishFailedMatch(
+                        settlement,
+                        physicalReservation,
+                        restored,
+                        "reserve release rollback incomplete"
+                    );
+                }
+            }
+
+            if (!this.plugin.getStorageManager().updateOrder(settledBuyOrder)
+                || !this.plugin.getStorageManager().updateOrder(settledSellOrder)) {
+                boolean restored = this.rollbackMatchState(
+                    previousBuyOrder, previousSellOrder, buyerEscrow, sellerEscrow,
+                    releasedReserve, null, null
+                );
+                this.plugin.getLogger().severe("[AssetAudit] MATCH_ABORT buyOrder=" + buyOrder.getId()
+                    + " sellOrder=" + sellOrder.getId() + " reason=order_update_failed");
+                return this.finishFailedMatch(
+                    settlement,
+                    physicalReservation,
+                    restored,
+                    "order update rollback incomplete"
+                );
+            }
+
+            Trade trade = this.recordTrade(buyOrder.getItemId(), buyOrder.getPlayerUuid(),
+                sellOrder.getPlayerUuid(), tradePrice, quantity, totalAmount, buyerFee, sellerFee,
+                buyOrder.getId(), sellOrder.getId());
+            if (trade == null) {
+                boolean restored = this.rollbackMatchState(
+                    previousBuyOrder, previousSellOrder, buyerEscrow, sellerEscrow,
+                    releasedReserve, null, null
+                );
+                this.plugin.getLogger().severe("[AssetAudit] MATCH_ABORT buyOrder=" + buyOrder.getId()
+                    + " sellOrder=" + sellOrder.getId() + " reason=trade_record_failed");
+                return this.finishFailedMatch(
+                    settlement,
+                    physicalReservation,
+                    restored,
+                    "trade record rollback incomplete"
+                );
+            }
+
+            MoneyDeliveryReceipt moneyDelivery;
+            try {
+                moneyDelivery = this.deliverMatchedMoney(sellerUuid, sellerReceives);
+            } catch (Throwable throwable) {
+                String failureReason = "seller delivery result unknown: "
+                    + throwable.getClass().getSimpleName();
+                this.plugin.getLogger().log(
+                    Level.SEVERE,
+                    "[AssetAudit] MATCH_IN_DOUBT buyOrder=" + buyOrder.getId()
+                        + " sellOrder=" + sellOrder.getId()
+                        + " reason=seller_delivery_exception",
+                    throwable
+                );
+                return this.markSettlementInDoubt(
+                    settlement,
+                    physicalReservation,
+                    failureReason
+                );
+            }
+            if (moneyDelivery == null) {
+                boolean restored = this.rollbackMatchState(
+                    previousBuyOrder, previousSellOrder, buyerEscrow, sellerEscrow,
+                    releasedReserve, trade, null
+                );
+                this.plugin.getLogger().severe(
+                    "[AssetAudit] MATCH_ABORT buyOrder=" + buyOrder.getId()
+                        + " sellOrder=" + sellOrder.getId()
+                        + " reason=seller_delivery_failed"
+                );
+                return this.finishFailedMatch(
+                    settlement,
+                    physicalReservation,
+                    restored,
+                    "seller delivery rollback incomplete"
+                );
+            }
+
+            BuyerDeliveryReceipt buyerDelivery;
+            try {
+                buyerDelivery = this.queueTradeItems(
+                    buyerUuid,
+                    deliveredItemBase64,
+                    quantity,
+                    trade.getId()
+                );
+            } catch (Throwable throwable) {
+                String failureReason = "buyer delivery result unknown: "
+                    + throwable.getClass().getSimpleName();
+                this.plugin.getLogger().log(
+                    Level.SEVERE,
+                    "[AssetAudit] MATCH_IN_DOUBT buyOrder=" + buyOrder.getId()
+                        + " sellOrder=" + sellOrder.getId()
+                        + " reason=buyer_delivery_exception",
+                    throwable
+                );
+                return this.markSettlementInDoubt(
+                    settlement,
+                    physicalReservation,
+                    failureReason
+                );
+            }
+            if (buyerDelivery == null) {
+                boolean restored = this.rollbackMatchState(
                     previousBuyOrder, previousSellOrder, buyerEscrow, sellerEscrow,
                     releasedReserve, trade, moneyDelivery
                 );
-                this.plugin.getLogger().severe("[AssetAudit] MATCH_ABORT buyOrder=" + buyOrder.getId()
-                    + " sellOrder=" + sellOrder.getId() + " reason=delivery_failed");
-                return false;
+                this.plugin.getLogger().severe(
+                    "[AssetAudit] MATCH_ABORT buyOrder=" + buyOrder.getId()
+                        + " sellOrder=" + sellOrder.getId()
+                        + " reason=buyer_delivery_failed"
+                );
+                return this.finishFailedMatch(
+                    settlement,
+                    physicalReservation,
+                    restored,
+                    "buyer delivery rollback incomplete"
+                );
             }
-        }
-        catch (Throwable throwable) {
-            this.rollbackMatchState(
-                previousBuyOrder, previousSellOrder, buyerEscrow, sellerEscrow,
-                releasedReserve, trade, moneyDelivery
+
+            buyerDeliveryCompleted = true;
+            this.copySettledOrder(buyOrder, settledBuyOrder);
+            this.copySettledOrder(sellOrder, settledSellOrder);
+            if (!this.completeCommittedSettlement(
+                settlement,
+                physicalReservation
+            )) {
+                return MatchOutcome.IN_DOUBT;
+            }
+            committedSettlement = true;
+            try {
+                this.releaseCommittedMoneyDelivery(moneyDelivery);
+                this.releaseCommittedBuyerDelivery(buyerDelivery);
+                if (warehouseManager != null) {
+                    warehouseManager.onWarehouseOrderSettled(
+                        settledSellOrder,
+                        sellerEscrow
+                    );
+                }
+                this.plugin.collectTax(buyerFee);
+                this.plugin.collectTax(sellerFee);
+                this.updateItemStatusAfterTrade(
+                    buyOrder.getItemId(),
+                    tradePrice,
+                    quantity
+                );
+                this.refreshLowestSellStatus(
+                    buyOrder.getItemId(),
+                    lowestSellBeforeTrade
+                );
+                SellBuyerTracker sellBuyerTracker = this.plugin.getSellBuyerTracker();
+                if (sellBuyerTracker != null) {
+                    sellBuyerTracker.recordNewBuyer(
+                        sellerUuid,
+                        sellOrder.getPlayerName(),
+                        buyerUuid
+                    );
+                }
+            } catch (Throwable throwable) {
+                this.plugin.getLogger().log(
+                    Level.SEVERE,
+                    "[AssetAudit] MATCH_POST_COMMIT_SIDE_EFFECT_FAILED buyOrder="
+                        + buyOrder.getId() + " sellOrder=" + sellOrder.getId(),
+                    throwable
+                );
+            }
+            this.notifyMatchParties(
+                buyOrder,
+                sellOrder,
+                deliveredItemBase64,
+                quantity,
+                sellerReceives,
+                notifyBuyer,
+                notifySeller
             );
-            this.plugin.getLogger().severe("[AssetAudit] MATCH_ABORT buyOrder=" + buyOrder.getId()
-                + " sellOrder=" + sellOrder.getId() + " reason=delivery_exception: "
-                + throwable.getClass().getSimpleName());
+            return MatchOutcome.SUCCESS;
+        } catch (Throwable throwable) {
+            if (buyerDeliveryCompleted) {
+                this.plugin.getLogger().log(
+                    Level.SEVERE,
+                    "[AssetAudit] MATCH_POST_DELIVERY_EXCEPTION buyOrder="
+                        + buyOrder.getId() + " sellOrder=" + sellOrder.getId(),
+                    throwable
+                );
+                if (committedSettlement
+                    || this.completeCommittedSettlement(
+                        settlement,
+                        physicalReservation
+                    )) {
+                    return MatchOutcome.SUCCESS;
+                }
+                return MatchOutcome.IN_DOUBT;
+            }
+            String failureReason = "unexpected settlement exception: "
+                + throwable.getClass().getSimpleName();
+            this.plugin.getLogger().log(
+                Level.SEVERE,
+                "[AssetAudit] MATCH_IN_DOUBT buyOrder=" + buyOrder.getId()
+                    + " sellOrder=" + sellOrder.getId()
+                    + " reason=unexpected_settlement_exception",
+                throwable
+            );
+            return this.markSettlementInDoubt(
+                settlement,
+                physicalReservation,
+                failureReason
+            );
+        }
+    }
+
+    private MatchOutcome finishFailedMatch(
+        MatchSettlementJournal.Entry settlement,
+        AutoWarehouseManager.SaleReservation physicalReservation,
+        boolean logicalRollbackComplete,
+        String failureReason
+    ) {
+        if (!logicalRollbackComplete) {
+            return this.markSettlementInDoubt(
+                settlement,
+                physicalReservation,
+                failureReason
+            );
+        }
+        if (!physicalReservation.rollback()) {
+            this.plugin.getLogger().severe(
+                "[AssetAudit] WAREHOUSE_PHYSICAL_ROLLBACK_PENDING reason="
+                    + failureReason
+            );
+            return this.persistSettlementInDoubt(
+                settlement,
+                "physical rollback incomplete: " + failureReason
+            );
+        }
+        MatchSettlementJournal journal =
+            this.plugin.getMatchSettlementJournal();
+        if (journal == null
+            || !journal.persistDecision(
+                settlement.id(),
+                MatchSettlementJournal.Decision.ROLLBACK,
+                failureReason
+            )) {
+            this.plugin.getLogger().severe(
+                "[AssetAudit] MATCH_ROLLBACK_DECISION_SAVE_FAILED transaction="
+                    + settlement.id() + " reason="
+                    + (journal == null
+                        ? "journal unavailable"
+                        : journal.lastFailure())
+            );
+            return MatchOutcome.IN_DOUBT;
+        }
+        if (!journal.clear(settlement.id())) {
+            this.plugin.getLogger().severe(
+                "[AssetAudit] MATCH_ROLLBACK_CLEAR_FAILED transaction="
+                    + settlement.id() + " reason=" + journal.lastFailure()
+            );
+            return MatchOutcome.IN_DOUBT;
+        }
+        return MatchOutcome.CLEAN_FAILURE;
+    }
+
+    private boolean completeCommittedSettlement(
+        MatchSettlementJournal.Entry settlement,
+        AutoWarehouseManager.SaleReservation physicalReservation
+    ) {
+        boolean physicalCommitted;
+        try {
+            physicalCommitted = physicalReservation.commit();
+        } catch (Throwable throwable) {
+            this.plugin.getLogger().log(
+                Level.SEVERE,
+                "[AssetAudit] WAREHOUSE_SALE_COMMIT_EXCEPTION transaction="
+                    + settlement.id(),
+                throwable
+            );
+            this.persistSettlementInDoubt(
+                settlement,
+                "physical sale commit result unknown: "
+                    + throwable.getClass().getSimpleName()
+            );
             return false;
         }
-
-        this.plugin.collectTax(buyerFee);
-        this.plugin.collectTax(sellerFee);
-        this.updateItemStatusAfterTrade(buyOrder.getItemId(), tradePrice, quantity);
-        this.refreshLowestSellStatus(buyOrder.getItemId(), lowestSellBeforeTrade);
-        SellBuyerTracker sellBuyerTracker = this.plugin.getSellBuyerTracker();
-        if (sellBuyerTracker != null) {
-            sellBuyerTracker.recordNewBuyer(sellerUuid, sellOrder.getPlayerName(), buyerUuid);
+        if (!physicalCommitted) {
+            this.plugin.getLogger().severe(
+                "[AssetAudit] WAREHOUSE_SALE_COMMIT_PENDING transaction="
+                    + settlement.id()
+            );
+            this.persistSettlementInDoubt(
+                settlement,
+                "physical sale commit incomplete"
+            );
+            return false;
         }
-        this.copySettledOrder(buyOrder, settledBuyOrder);
-        this.copySettledOrder(sellOrder, settledSellOrder);
-        this.notifyMatchParties(
-            buyOrder,
-            sellOrder,
-            deliveredItemBase64,
-            quantity,
-            sellerReceives,
-            notifyBuyer,
-            notifySeller
-        );
+        MatchSettlementJournal journal =
+            this.plugin.getMatchSettlementJournal();
+        if (journal == null
+            || !journal.persistDecision(
+                settlement.id(),
+                MatchSettlementJournal.Decision.COMMIT,
+                ""
+            )) {
+            this.plugin.getLogger().severe(
+                "[AssetAudit] MATCH_COMMIT_DECISION_SAVE_FAILED transaction="
+                    + settlement.id() + " reason="
+                    + (journal == null
+                        ? "journal unavailable"
+                        : journal.lastFailure())
+            );
+            return false;
+        }
+        if (!journal.clear(settlement.id())) {
+            this.plugin.getLogger().severe(
+                "[AssetAudit] MATCH_COMMIT_CLEAR_FAILED transaction="
+                    + settlement.id() + " reason=" + journal.lastFailure()
+            );
+            return false;
+        }
         return true;
+    }
+
+    private MatchOutcome markSettlementInDoubt(
+        MatchSettlementJournal.Entry settlement,
+        AutoWarehouseManager.SaleReservation physicalReservation,
+        String failureReason
+    ) {
+        try {
+            physicalReservation.quarantine(failureReason);
+        } catch (Throwable throwable) {
+            this.plugin.getLogger().log(
+                Level.SEVERE,
+                "[AssetAudit] WAREHOUSE_QUARANTINE_FAILED transaction="
+                    + settlement.id(),
+                throwable
+            );
+        }
+        return this.persistSettlementInDoubt(settlement, failureReason);
+    }
+
+    private MatchOutcome persistSettlementInDoubt(
+        MatchSettlementJournal.Entry settlement,
+        String failureReason
+    ) {
+        MatchSettlementJournal journal =
+            this.plugin.getMatchSettlementJournal();
+        if (journal == null
+            || !journal.persistDecision(
+                settlement.id(),
+                MatchSettlementJournal.Decision.IN_DOUBT,
+                failureReason
+            )) {
+            this.plugin.getLogger().severe(
+                "[AssetAudit] MATCH_IN_DOUBT_SAVE_FAILED transaction="
+                    + settlement.id() + " reason="
+                    + (journal == null
+                        ? "journal unavailable"
+                        : journal.lastFailure())
+            );
+        }
+        return MatchOutcome.IN_DOUBT;
+    }
+
+    private String inDoubtMatchMessage(int buyOrderId, int sellOrderId) {
+        return "§c交易状态需要资产核验，系统已锁定相关订单与实体仓库，"
+            + "不会自动撤单或重复返还资产。请联系管理员并提供买单 #"
+            + buyOrderId + "、卖单 #" + sellOrderId + "。";
+    }
+
+    private enum MatchOutcome {
+        SUCCESS,
+        CLEAN_FAILURE,
+        IN_DOUBT
     }
 
     private void notifyMatchParties(Order buyOrder, Order sellOrder, String itemBase64, int quantity,
@@ -1985,6 +2740,43 @@ public class OrderManager {
         return sellOrder == null ? "\u672a\u77e5\u7269\u54c1" : "#" + sellOrder.getItemId();
     }
 
+    private BuyerDeliveryReceipt queueTradeItems(
+        UUID buyerUuid,
+        String itemBase64,
+        int quantity,
+        int tradeId
+    ) {
+        AutoWarehouseManager warehouseManager = this.plugin.getAutoWarehouseManager();
+        if (warehouseManager != null
+            && warehouseManager.hasActiveBuyWarehouse(buyerUuid)) {
+            if (!warehouseManager.enqueueBuyTradeDelivery(
+                buyerUuid,
+                itemBase64,
+                quantity,
+                "trade:" + tradeId
+            )) {
+                return null;
+            }
+            return new BuyerDeliveryReceipt(
+                buyerUuid,
+                itemBase64,
+                quantity,
+                "trade:" + tradeId,
+                true
+            );
+        }
+        if (!this.deliverMatchedItems(buyerUuid, itemBase64, quantity)) {
+            return null;
+        }
+        return new BuyerDeliveryReceipt(
+            buyerUuid,
+            itemBase64,
+            quantity,
+            null,
+            false
+        );
+    }
+
     private boolean deliverMatchedItems(UUID buyerUuid, String itemBase64, int quantity) {
         if (buyerUuid == null || itemBase64 == null || itemBase64.isEmpty() || quantity <= 0) {
             return false;
@@ -1994,7 +2786,8 @@ public class OrderManager {
             return false;
         }
         Player buyer = Bukkit.getPlayer(buyerUuid);
-        if (buyer != null && buyer.isOnline()) {
+        if (!this.plugin.isSettlementDeliveryBlocked()
+            && buyer != null && buyer.isOnline()) {
             this.plugin.getStorageManager().withdrawWarehouseItem(buyer, itemBase64);
         }
         return true;
@@ -2005,16 +2798,122 @@ public class OrderManager {
             return null;
         }
         if (amount.compareTo(BigDecimal.ZERO) == 0) {
-            return new MoneyDeliveryReceipt(sellerUuid, amount, false);
-        }
-        Player seller = Bukkit.getPlayer(sellerUuid);
-        if (seller != null && seller.isOnline() && EconomyUtil.deposit(sellerUuid, amount)) {
-            return new MoneyDeliveryReceipt(sellerUuid, amount, true);
+            return new MoneyDeliveryReceipt(sellerUuid, amount);
         }
         if (this.plugin.getStorageManager().addToMoneyWarehouse(sellerUuid.toString(), amount)) {
-            return new MoneyDeliveryReceipt(sellerUuid, amount, false);
+            return new MoneyDeliveryReceipt(sellerUuid, amount);
         }
         return null;
+    }
+
+    private void releaseCommittedMoneyDelivery(MoneyDeliveryReceipt delivery) {
+        if (delivery == null || delivery.amount.compareTo(BigDecimal.ZERO) <= 0) {
+            return;
+        }
+        Player seller = Bukkit.getPlayer(delivery.playerUuid);
+        if (seller != null && seller.isOnline()) {
+            String playerUuid = delivery.playerUuid.toString();
+            if (!this.plugin.getStorageManager().takeFromMoneyWarehouse(
+                    playerUuid,
+                    delivery.amount
+                )) {
+                this.plugin.getLogger().warning(
+                    "[AssetAudit] COMMITTED_MONEY_DELIVERY_RETAINED seller="
+                        + playerUuid + " amount=" + delivery.amount
+                );
+                this.plugin.markStorageUnavailable(
+                    "committed money delivery missing from warehouse",
+                    null
+                );
+                return;
+            }
+            if (!EconomyUtil.deposit(delivery.playerUuid, delivery.amount)
+                && !this.plugin.getStorageManager().addToMoneyWarehouse(
+                    playerUuid,
+                    delivery.amount
+                )) {
+                this.plugin.getLogger().severe(
+                    "[AssetAudit] COMMITTED_MONEY_DELIVERY_ROLLBACK_FAILED seller="
+                        + playerUuid + " amount=" + delivery.amount
+                );
+                this.plugin.markStorageUnavailable(
+                    "committed money delivery rollback failed",
+                    null
+                );
+            }
+        }
+    }
+
+    private void releaseCommittedBuyerDelivery(BuyerDeliveryReceipt delivery) {
+        if (delivery == null) {
+            return;
+        }
+        if (delivery.buyWarehouse) {
+            AutoWarehouseManager warehouseManager =
+                this.plugin.getAutoWarehouseManager();
+            if (warehouseManager == null
+                || !warehouseManager.confirmCommittedBuyDelivery(
+                    delivery.idempotencyKey
+                )) {
+                this.plugin.getLogger().warning(
+                    "[AssetAudit] BUY_WAREHOUSE_TOMBSTONE_RETAINED delivery="
+                        + delivery.idempotencyKey
+                );
+            }
+            return;
+        }
+        Player buyer = Bukkit.getPlayer(delivery.playerUuid);
+        if (buyer != null && buyer.isOnline()) {
+            ItemStack item = ItemSerializer.itemFromBase64(delivery.itemBase64);
+            if (item == null) {
+                this.plugin.getLogger().severe(
+                    "[AssetAudit] COMMITTED_ITEM_DELIVERY_RETAINED buyer="
+                        + delivery.playerUuid + " reason=item_deserialization_failed"
+                );
+                this.plugin.markStorageUnavailable(
+                    "committed item delivery deserialization failed",
+                    null
+                );
+                return;
+            }
+            String playerUuid = delivery.playerUuid.toString();
+            if (!this.plugin.getStorageManager().takeFromPlayerItemWarehouse(
+                    playerUuid,
+                    delivery.itemBase64,
+                    delivery.quantity
+                )) {
+                this.plugin.getLogger().warning(
+                    "[AssetAudit] COMMITTED_ITEM_DELIVERY_RETAINED buyer="
+                        + playerUuid + " quantity=" + delivery.quantity
+                );
+                this.plugin.markStorageUnavailable(
+                    "committed item delivery missing from warehouse",
+                    null
+                );
+                return;
+            }
+            int delivered = InventoryDelivery.addUpTo(
+                buyer,
+                item,
+                delivery.quantity
+            );
+            int remaining = delivery.quantity - delivered;
+            if (remaining > 0
+                && !this.plugin.getStorageManager().addToPlayerItemWarehouse(
+                    playerUuid,
+                    delivery.itemBase64,
+                    remaining
+                )) {
+                this.plugin.getLogger().severe(
+                    "[AssetAudit] COMMITTED_ITEM_DELIVERY_ROLLBACK_FAILED buyer="
+                        + playerUuid + " quantity=" + remaining
+                );
+                this.plugin.markStorageUnavailable(
+                    "committed item delivery rollback failed",
+                    null
+                );
+            }
+        }
     }
 
     private Trade recordTrade(int itemId, String buyerUuid, String sellerUuid, BigDecimal price, int quantity,
@@ -2035,43 +2934,47 @@ public class OrderManager {
         return this.plugin.getStorageManager().insertTrade(trade) > 0 ? trade : null;
     }
 
-    private void rollbackMatchState(Order previousBuyOrder, Order previousSellOrder,
-                                    EscrowEntry buyerEscrow, EscrowEntry sellerEscrow,
-                                    BigDecimal releasedReserve, Trade trade,
-                                    MoneyDeliveryReceipt moneyDelivery) {
+    private boolean rollbackMatchState(Order previousBuyOrder, Order previousSellOrder,
+                                       EscrowEntry buyerEscrow, EscrowEntry sellerEscrow,
+                                       BigDecimal releasedReserve, Trade trade,
+                                       MoneyDeliveryReceipt moneyDelivery) {
+        boolean restored = true;
         if (moneyDelivery != null && !this.rollbackMoneyDelivery(moneyDelivery)) {
+            restored = false;
             this.plugin.getLogger().severe("[AssetAudit] MONEY_DELIVERY_ROLLBACK_FAILED seller="
                 + moneyDelivery.playerUuid + " amount=" + moneyDelivery.amount);
         }
         if (trade != null && !this.plugin.getStorageManager().deleteTrade(trade.getId())) {
+            restored = false;
             this.plugin.getLogger().severe("[AssetAudit] TRADE_RECORD_ROLLBACK_FAILED trade=" + trade.getId());
         }
         if (previousBuyOrder != null
             && !this.plugin.getStorageManager().updateOrder(previousBuyOrder)) {
+            restored = false;
             this.plugin.getLogger().severe("[AssetAudit] BUY_ORDER_ROLLBACK_FAILED order="
                 + previousBuyOrder.getId());
         }
         if (previousSellOrder != null
             && !this.plugin.getStorageManager().updateOrder(previousSellOrder)) {
+            restored = false;
             this.plugin.getLogger().severe("[AssetAudit] SELL_ORDER_ROLLBACK_FAILED order="
                 + previousSellOrder.getId());
         }
         if (releasedReserve != null && releasedReserve.compareTo(BigDecimal.ZERO) > 0
             && !this.plugin.getStorageManager().takeFromMoneyWarehouse(
                 previousBuyOrder.getPlayerUuid(), releasedReserve)) {
+            restored = false;
             this.plugin.getLogger().severe("[AssetAudit] RESERVE_ROLLBACK_FAILED buyOrder="
                 + previousBuyOrder.getId() + " amount=" + releasedReserve);
         }
-        this.restoreEscrowState(buyerEscrow);
-        this.restoreEscrowState(sellerEscrow);
+        restored &= this.restoreEscrowState(buyerEscrow);
+        restored &= this.restoreEscrowState(sellerEscrow);
+        return restored;
     }
 
     private boolean rollbackMoneyDelivery(MoneyDeliveryReceipt delivery) {
         if (delivery.amount.compareTo(BigDecimal.ZERO) <= 0) {
             return true;
-        }
-        if (delivery.directDeposit) {
-            return EconomyUtil.withdraw(delivery.playerUuid, delivery.amount);
         }
         return this.plugin.getStorageManager().takeFromMoneyWarehouse(
             delivery.playerUuid.toString(), delivery.amount);
@@ -2230,6 +3133,15 @@ public class OrderManager {
     }
 
     private boolean returnEscrow(Order order) {
+        if (order != null
+            && order.getSourceWarehouseId() != null
+            && !order.getSourceWarehouseId().isBlank()) {
+            this.plugin.getLogger().severe(
+                "[AssetAudit] WAREHOUSE_ESCROW_RETURN_BLOCKED order=" + order.getId()
+                    + " warehouse=" + order.getSourceWarehouseId()
+            );
+            return false;
+        }
         if (order.getOrderType() == Order.OrderType.BUY) {
             EscrowEntry escrow = this.plugin.getStorageManager().getEscrow(order.getId(), EscrowEntry.AssetType.MONEY);
             UUID playerUuid = this.parseUuid(order.getPlayerUuid());
@@ -2294,7 +3206,10 @@ public class OrderManager {
     }
 
     private boolean isValidSellEscrow(Order order, EscrowEntry escrow) {
-        return order != null
+        if (order == null || escrow == null) {
+            return false;
+        }
+        boolean baseValid = order != null
             && order.getOrderType() == Order.OrderType.SELL
             && escrow != null
             && escrow.getAssetType() == EscrowEntry.AssetType.ITEM
@@ -2304,6 +3219,44 @@ public class OrderManager {
             && !escrow.getItemBase64().isEmpty()
             && escrow.getQuantity() == order.getRemainingQty()
             && escrow.getQuantity() > 0;
+        if (!baseValid) {
+            return false;
+        }
+        String orderSource = order.getSourceWarehouseId();
+        String escrowSource = escrow.getSourceWarehouseId();
+        boolean orderWarehouse = orderSource != null && !orderSource.isBlank();
+        boolean escrowWarehouse = escrowSource != null && !escrowSource.isBlank();
+        return orderWarehouse == escrowWarehouse
+            && (!orderWarehouse || orderSource.equals(escrowSource));
+    }
+
+    private boolean isWarehouseSourceIdentity(
+        Order order,
+        EscrowEntry escrow,
+        String warehouseId
+    ) {
+        return order != null
+            && escrow != null
+            && warehouseId != null
+            && warehouseId.equals(order.getSourceWarehouseId())
+            && warehouseId.equals(escrow.getSourceWarehouseId())
+            && order.getOrderType() == Order.OrderType.SELL
+            && escrow.getAssetType() == EscrowEntry.AssetType.ITEM
+            && order.getPlayerUuid() != null
+            && order.getPlayerUuid().equals(escrow.getPlayerUuid())
+            && escrow.getItemBase64() != null
+            && !escrow.getItemBase64().isBlank();
+    }
+
+    private boolean isSettlementLockedOrder(int orderId) {
+        MatchSettlementJournal settlementJournal =
+            this.plugin.getMatchSettlementJournal();
+        AutoWarehouseManager warehouseManager =
+            this.plugin.getAutoWarehouseManager();
+        return (settlementJournal != null
+                && settlementJournal.isOrderLocked(orderId))
+            || (warehouseManager != null
+                && warehouseManager.isSettlementLockedOrder(orderId));
     }
 
     private boolean isValidMoneyEscrow(Order order, EscrowEntry escrow, BigDecimal requiredAmount) {
@@ -2333,11 +3286,13 @@ public class OrderManager {
         return this.plugin.getStorageManager().insertEscrow(next);
     }
 
-    private void restoreEscrowState(EscrowEntry escrow) {
+    private boolean restoreEscrowState(EscrowEntry escrow) {
         if (escrow == null || !this.plugin.getStorageManager().insertEscrow(this.copyEscrow(escrow))) {
             this.plugin.getLogger().severe("[AssetAudit] ESCROW_ROLLBACK_FAILED order="
                 + (escrow == null ? "unknown" : escrow.getOrderId()));
+            return false;
         }
+        return true;
     }
 
     private void abortBuyOrderCreation(Order order, BigDecimal refundAmount) {
@@ -2372,6 +3327,7 @@ public class OrderManager {
         copy.setQuantity(source.getQuantity());
         copy.setFilledQty(source.getFilledQty());
         copy.setStatus(source.getStatus());
+        copy.setSourceWarehouseId(source.getSourceWarehouseId());
         copy.setCreatedAt(source.getCreatedAt() == null ? null : new Timestamp(source.getCreatedAt().getTime()));
         copy.setUpdatedAt(source.getUpdatedAt() == null ? null : new Timestamp(source.getUpdatedAt().getTime()));
         return copy;
@@ -2385,6 +3341,7 @@ public class OrderManager {
         copy.setAmount(source.getAmount() == null ? BigDecimal.ZERO : source.getAmount());
         copy.setItemBase64(source.getItemBase64());
         copy.setQuantity(source.getQuantity());
+        copy.setSourceWarehouseId(source.getSourceWarehouseId());
         return copy;
     }
 
@@ -2504,12 +3461,32 @@ public class OrderManager {
     private static final class MoneyDeliveryReceipt {
         private final UUID playerUuid;
         private final BigDecimal amount;
-        private final boolean directDeposit;
 
-        private MoneyDeliveryReceipt(UUID playerUuid, BigDecimal amount, boolean directDeposit) {
+        private MoneyDeliveryReceipt(UUID playerUuid, BigDecimal amount) {
             this.playerUuid = playerUuid;
             this.amount = amount;
-            this.directDeposit = directDeposit;
+        }
+    }
+
+    private static final class BuyerDeliveryReceipt {
+        private final UUID playerUuid;
+        private final String itemBase64;
+        private final int quantity;
+        private final String idempotencyKey;
+        private final boolean buyWarehouse;
+
+        private BuyerDeliveryReceipt(
+            UUID playerUuid,
+            String itemBase64,
+            int quantity,
+            String idempotencyKey,
+            boolean buyWarehouse
+        ) {
+            this.playerUuid = playerUuid;
+            this.itemBase64 = itemBase64;
+            this.quantity = quantity;
+            this.idempotencyKey = idempotencyKey;
+            this.buyWarehouse = buyWarehouse;
         }
     }
 

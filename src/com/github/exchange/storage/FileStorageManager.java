@@ -16,6 +16,7 @@ import com.github.exchange.model.ItemStatus;
 import com.github.exchange.model.Order;
 import com.github.exchange.model.Trade;
 import com.github.exchange.storage.StorageManager;
+import com.github.exchange.util.DurableFiles;
 import com.github.exchange.util.EconomyUtil;
 import com.github.exchange.util.InventoryDelivery;
 import com.github.exchange.util.ItemDisplayNames;
@@ -23,15 +24,13 @@ import com.github.exchange.util.ItemSerializer;
 import java.io.File;
 import java.io.IOException;
 import java.math.BigDecimal;
-import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.StandardCopyOption;
 import java.sql.Timestamp;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.ZoneId;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
@@ -39,6 +38,7 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.bukkit.configuration.ConfigurationSection;
+import org.bukkit.configuration.InvalidConfigurationException;
 import org.bukkit.configuration.file.YamlConfiguration;
 import org.bukkit.entity.Player;
 import org.bukkit.inventory.ItemStack;
@@ -51,7 +51,8 @@ implements StorageManager {
     private final File itemsFolder;
     private final File tradesFolder;
     private final File ordersFolder;
-    private final File warehouseFolder;
+    private final File legacyWarehouseFolder;
+    private final File warehouseStateFile;
     private final File dailyRegisterLimitFile;
     private final Map<Integer, ExchangeItem> itemCache = new ConcurrentHashMap<Integer, ExchangeItem>();
     private final Map<Integer, Order> orderCache = new ConcurrentHashMap<Integer, Order>();
@@ -71,26 +72,27 @@ implements StorageManager {
         this.itemsFolder = new File(this.dataFolder, "items");
         this.tradesFolder = new File(this.dataFolder, "trades");
         this.ordersFolder = new File(this.dataFolder, "orders");
-        this.warehouseFolder = new File(this.dataFolder, "warehouse");
+        this.legacyWarehouseFolder = new File(this.dataFolder, "warehouse");
+        this.warehouseStateFile = new File(
+            this.dataFolder,
+            "warehouse-state.yml"
+        );
         this.dailyRegisterLimitFile = new File(this.dataFolder, "daily-register-limits.yml");
     }
 
     @Override
     public void init() {
-        if (!this.dataFolder.exists()) {
-            this.dataFolder.mkdirs();
+        if (!this.dataFolder.exists() && !this.dataFolder.mkdirs()) {
+            throw new IllegalStateException("Failed to create storage data directory.");
         }
-        if (!this.itemsFolder.exists()) {
-            this.itemsFolder.mkdirs();
+        if (!this.itemsFolder.exists() && !this.itemsFolder.mkdirs()) {
+            throw new IllegalStateException("Failed to create item storage directory.");
         }
-        if (!this.tradesFolder.exists()) {
-            this.tradesFolder.mkdirs();
+        if (!this.tradesFolder.exists() && !this.tradesFolder.mkdirs()) {
+            throw new IllegalStateException("Failed to create trade storage directory.");
         }
-        if (!this.ordersFolder.exists()) {
-            this.ordersFolder.mkdirs();
-        }
-        if (!this.warehouseFolder.exists()) {
-            this.warehouseFolder.mkdirs();
+        if (!this.ordersFolder.exists() && !this.ordersFolder.mkdirs()) {
+            throw new IllegalStateException("Failed to create order storage directory.");
         }
         this.loadIdCounters();
         this.loadAllItems();
@@ -106,7 +108,9 @@ implements StorageManager {
 
     @Override
     public void shutdown() {
-        this.saveIdCounters();
+        if (this.plugin.isStorageAvailable()) {
+            this.saveIdCounters();
+        }
     }
 
     private void loadIdCounters() {
@@ -169,12 +173,16 @@ implements StorageManager {
         int id = this.nextItemId.getAndIncrement();
         item.setId(id);
         this.itemCache.put(id, item);
-        this.saveExchangeItem(item);
+        if (!this.saveExchangeItem(item)) {
+            this.itemCache.remove(id, item);
+            this.nextItemId.compareAndSet(id + 1, id);
+            return -1;
+        }
         this.saveIdCounters();
         return id;
     }
 
-    private void saveExchangeItem(ExchangeItem item) {
+    private boolean saveExchangeItem(ExchangeItem item) {
         File file = new File(this.itemsFolder, item.getId() + ".yml");
         YamlConfiguration config = new YamlConfiguration();
         config.set("id", (Object)item.getId());
@@ -195,7 +203,11 @@ implements StorageManager {
                 : 0L)
         );
         config.set("last_empty_at", (Object)(item.getLastEmptyAt() != null ? item.getLastEmptyAt().getTime() : 0L));
-        this.saveYamlAtomically(file, config, "item " + item.getId());
+        return this.saveYamlAtomically(
+            file,
+            config,
+            "item " + item.getId()
+        );
     }
 
     @Override
@@ -208,11 +220,16 @@ implements StorageManager {
     }
 
     @Override
-    public void deleteExchangeItem(int itemId) {
+    public synchronized void deleteExchangeItem(int itemId) {
         ExchangeItem removed = this.itemCache.remove(itemId);
         if (removed != null) {
             this.warehouseCache.remove(removed.getItemBase64());
-            this.saveWarehouse();
+            if (!this.saveWarehouse()) {
+                this.failClosed(
+                    "failed to persist warehouse cleanup for item " + itemId,
+                    null
+                );
+            }
         }
         this.statusCache.remove(itemId);
         this.saveAllStatuses();
@@ -238,14 +255,19 @@ implements StorageManager {
             this.tradeCache.remove(tradeId);
         }
         this.saveAllEscrow();
-        this.saveOrdersForItem(itemId);
-        File file = new File(this.itemsFolder, itemId + ".yml");
-        if (file.exists()) {
-            file.delete();
+        if (!this.saveOrdersForItem(itemId)
+            || !this.saveTradesForItem(itemId)) {
+            this.failClosed(
+                "failed to persist order or trade cleanup for item " + itemId,
+                null
+            );
         }
-        File tradesFile = new File(this.tradesFolder, "item_" + itemId + ".yml");
-        if (tradesFile.exists()) {
-            tradesFile.delete();
+        File file = new File(this.itemsFolder, itemId + ".yml");
+        if (!this.deleteFileDurably(file, "item " + itemId)) {
+            this.failClosed(
+                "failed to durably delete item " + itemId,
+                null
+            );
         }
     }
 
@@ -308,6 +330,7 @@ implements StorageManager {
                 try {
                     Order order = new Order(sec.getInt("id"), Order.OrderType.valueOf(sec.getString("order_type")), sec.getInt("item_id"), sec.getString("player_uuid"), new BigDecimal(sec.getString("price")), sec.getInt("quantity"), sec.getInt("filled_qty"), Order.OrderStatus.valueOf(sec.getString("status")), new Timestamp(sec.getLong("created_at")), new Timestamp(sec.getLong("updated_at")));
                     order.setPlayerName(sec.getString("player_name", ""));
+                    order.setSourceWarehouseId(sec.getString("source_warehouse_id"));
                     this.orderCache.put(order.getId(), order);
                     maxId = Math.max(maxId, order.getId());
                 } catch (RuntimeException ex) {
@@ -362,7 +385,6 @@ implements StorageManager {
     private boolean saveOrdersForItem(int itemId) {
         File file = new File(this.ordersFolder, "item_" + itemId + ".yml");
         YamlConfiguration config = new YamlConfiguration();
-        int count = 0;
         for (Order order : this.orderCache.values()) {
             if (order.getItemId() != itemId) continue;
             String key = String.valueOf(order.getId());
@@ -371,18 +393,19 @@ implements StorageManager {
             config.set(key + ".item_id", (Object)order.getItemId());
             config.set(key + ".player_uuid", (Object)order.getPlayerUuid());
             config.set(key + ".player_name", (Object)(order.getPlayerName() != null ? order.getPlayerName() : ""));
+            config.set(key + ".source_warehouse_id", (Object)order.getSourceWarehouseId());
             config.set(key + ".price", (Object)order.getPrice().toString());
             config.set(key + ".quantity", (Object)order.getQuantity());
             config.set(key + ".filled_qty", (Object)order.getFilledQty());
             config.set(key + ".status", (Object)order.getStatus().name());
             config.set(key + ".created_at", (Object)order.getCreatedAt().getTime());
             config.set(key + ".updated_at", (Object)order.getUpdatedAt().getTime());
-            ++count;
         }
-        if (count > 0) {
-            return this.saveYamlAtomically(file, config, "orders for item " + itemId);
-        }
-        return !file.exists() || file.delete();
+        return this.saveYamlAtomically(
+            file,
+            config,
+            "orders for item " + itemId
+        );
     }
 
     @Override
@@ -450,6 +473,22 @@ implements StorageManager {
         return result;
     }
 
+    @Override
+    public List<Order> getOrdersBySourceWarehouse(String sourceWarehouseId) {
+        ArrayList<Order> result = new ArrayList<Order>();
+        if (sourceWarehouseId == null || sourceWarehouseId.isBlank()) {
+            return result;
+        }
+        for (Order order : this.orderCache.values()) {
+            if (order != null
+                && sourceWarehouseId.equals(order.getSourceWarehouseId())) {
+                result.add(order);
+            }
+        }
+        result.sort(Comparator.comparingInt(Order::getId));
+        return result;
+    }
+
     private void loadAllTrades() {
         File[] files = this.tradesFolder.listFiles((dir, name) -> name.endsWith(".yml"));
         if (files == null) {
@@ -508,7 +547,6 @@ implements StorageManager {
     private boolean saveTradesForItem(int itemId) {
         File file = new File(this.tradesFolder, "item_" + itemId + ".yml");
         YamlConfiguration config = new YamlConfiguration();
-        int count = 0;
         for (Trade trade : this.tradeCache.values()) {
             if (trade.getItemId() != itemId) continue;
             String key = String.valueOf(trade.getId());
@@ -524,12 +562,12 @@ implements StorageManager {
             config.set(key + ".buy_order_id", (Object)trade.getBuyOrderId());
             config.set(key + ".sell_order_id", (Object)trade.getSellOrderId());
             config.set(key + ".traded_at", (Object)trade.getTradedAt().getTime());
-            ++count;
         }
-        if (count > 0) {
-            return this.saveYamlAtomically(file, config, "trades for item " + itemId);
-        }
-        return !file.exists() || file.delete();
+        return this.saveYamlAtomically(
+            file,
+            config,
+            "trades for item " + itemId
+        );
     }
 
     @Override
@@ -634,6 +672,7 @@ implements StorageManager {
             if (sec == null) continue;
             try {
                 EscrowEntry entry = new EscrowEntry(sec.getInt("order_id"), sec.getString("player_uuid"), EscrowEntry.AssetType.valueOf(sec.getString("asset_type")), sec.contains("amount") ? new BigDecimal(sec.getString("amount")) : BigDecimal.ZERO, sec.getString("item_base64"), sec.getInt("quantity"));
+                entry.setSourceWarehouseId(sec.getString("source_warehouse_id"));
                 this.escrowCache.put(this.escrowKey(entry.getOrderId(), entry.getAssetType()), entry);
             } catch (RuntimeException ex) {
                 this.warnBadRecord("escrow", file.getName(), key, ex);
@@ -669,6 +708,23 @@ implements StorageManager {
     }
 
     @Override
+    public List<EscrowEntry> getEscrowsBySourceWarehouse(String sourceWarehouseId) {
+        ArrayList<EscrowEntry> result = new ArrayList<EscrowEntry>();
+        if (sourceWarehouseId == null || sourceWarehouseId.isBlank()) {
+            return result;
+        }
+        for (EscrowEntry entry : this.escrowCache.values()) {
+            if (entry != null
+                && sourceWarehouseId.equals(entry.getSourceWarehouseId())) {
+                result.add(entry);
+            }
+        }
+        result.sort(Comparator.comparingInt(EscrowEntry::getOrderId)
+            .thenComparing(entry -> entry.getAssetType().name()));
+        return result;
+    }
+
+    @Override
     public boolean deleteEscrow(int orderId, EscrowEntry.AssetType assetType) {
         if (assetType == null) {
             return false;
@@ -692,6 +748,7 @@ implements StorageManager {
             config.set(key + ".order_id", (Object)entry.getOrderId());
             config.set(key + ".player_uuid", (Object)entry.getPlayerUuid());
             config.set(key + ".asset_type", (Object)entry.getAssetType().name());
+            config.set(key + ".source_warehouse_id", (Object)entry.getSourceWarehouseId());
             config.set(key + ".amount", (Object)(entry.getAmount() != null ? entry.getAmount().toString() : "0"));
             config.set(key + ".item_base64", (Object)entry.getItemBase64());
             config.set(key + ".quantity", (Object)entry.getQuantity());
@@ -764,26 +821,137 @@ implements StorageManager {
     }
 
     private void loadAllWarehouse() {
-        File[] files = this.warehouseFolder.listFiles((dir, name) -> name.endsWith(".yml"));
-        if (files == null) {
+        this.warehouseCache.clear();
+        if (this.warehouseStateFile.exists()) {
+            this.loadWarehouseStateFile();
+            this.archiveLegacyWarehouseDirectory();
             return;
         }
+
+        this.recoverLegacyWarehouseDirectoryIfNeeded();
+        this.loadLegacyWarehouseDirectory();
+        if (!this.saveWarehouse()) {
+            throw new IllegalStateException(
+                "Failed to persist the authoritative warehouse state."
+            );
+        }
+        if (this.legacyWarehouseFolder.exists()) {
+            this.plugin.getLogger().info(
+                "Migrated legacy warehouse directory to "
+                    + this.warehouseStateFile.getName()
+                    + "; the legacy directory is now ignored."
+            );
+            this.archiveLegacyWarehouseDirectory();
+        }
+    }
+
+    private void loadWarehouseStateFile() {
+        YamlConfiguration config = this.loadYamlStrictly(
+            this.warehouseStateFile,
+            "warehouse state"
+        );
+        int version = config.getInt("version", -1);
+        if (version != FileWarehouseState.VERSION) {
+            throw new IllegalStateException(
+                "Unsupported warehouse state version: " + version
+            );
+        }
+        try {
+            this.warehouseCache.putAll(
+                FileWarehouseState.decode(config.get("entries"))
+            );
+        } catch (IllegalArgumentException exception) {
+            throw new IllegalStateException(
+                "Invalid warehouse state in "
+                    + this.warehouseStateFile.getName(),
+                exception
+            );
+        }
+    }
+
+    private void loadLegacyWarehouseDirectory() {
+        if (!this.legacyWarehouseFolder.exists()) {
+            return;
+        }
+        if (!this.legacyWarehouseFolder.isDirectory()) {
+            throw new IllegalStateException(
+                "Legacy warehouse path is not a directory."
+            );
+        }
+        File[] files = this.legacyWarehouseFolder.listFiles(
+            (directory, name) -> name.endsWith(".yml")
+        );
+        if (files == null) {
+            throw new IllegalStateException(
+                "Failed to list the legacy warehouse directory."
+            );
+        }
+        Arrays.sort(files, Comparator.comparing(File::getName));
         for (File file : files) {
-            YamlConfiguration config = YamlConfiguration.loadConfiguration((File)file);
-            String itemBase64 = config.getString("item_base64");
-            int quantity = config.getInt("quantity", 0);
-            if (itemBase64 == null || quantity <= 0) continue;
-            this.warehouseCache.put(itemBase64, this.warehouseCache.getOrDefault(itemBase64, 0) + quantity);
+            YamlConfiguration config = this.loadYamlStrictly(
+                file,
+                "legacy warehouse entry " + file.getName()
+            );
+            Map<String, Object> rawEntry = new HashMap<String, Object>();
+            rawEntry.put("item_base64", config.get("item_base64"));
+            rawEntry.put("quantity", config.get("quantity"));
+            Map<String, Integer> decoded;
+            try {
+                decoded = FileWarehouseState.decode(List.of(rawEntry));
+            } catch (IllegalArgumentException exception) {
+                throw new IllegalStateException(
+                    "Invalid legacy warehouse entry " + file.getName(),
+                    exception
+                );
+            }
+            Map.Entry<String, Integer> entry =
+                decoded.entrySet().iterator().next();
+            String itemBase64 = entry.getKey();
+            int previous = this.warehouseCache.getOrDefault(itemBase64, 0);
+            int combined;
+            try {
+                combined = Math.addExact(previous, entry.getValue());
+            } catch (ArithmeticException exception) {
+                throw new IllegalStateException(
+                    "Legacy warehouse quantity overflow for "
+                        + itemBase64,
+                    exception
+                );
+            }
+            this.warehouseCache.put(itemBase64, combined);
+        }
+    }
+
+    private YamlConfiguration loadYamlStrictly(
+        File file,
+        String description
+    ) {
+        YamlConfiguration config = new YamlConfiguration();
+        try {
+            config.load(file);
+            return config;
+        } catch (IOException | InvalidConfigurationException exception) {
+            throw new IllegalStateException(
+                "Failed to load " + description + ".",
+                exception
+            );
         }
     }
 
     @Override
-    public boolean addToWarehouse(String itemBase64, int quantity) {
-        if (itemBase64 == null || quantity <= 0) {
+    public synchronized boolean addToWarehouse(String itemBase64, int quantity) {
+        if (!this.plugin.isStorageAvailable()
+            || itemBase64 == null || quantity <= 0) {
             return false;
         }
         int previous = this.warehouseCache.getOrDefault(itemBase64, 0);
-        this.warehouseCache.put(itemBase64, previous + quantity);
+        int updated;
+        try {
+            updated = Math.addExact(previous, quantity);
+        } catch (ArithmeticException exception) {
+            return false;
+        }
+        this.warehouseCache.put(itemBase64, updated);
         if (this.saveWarehouse()) {
             return true;
         }
@@ -796,13 +964,14 @@ implements StorageManager {
     }
 
     @Override
-    public int getWarehouseQuantity(String itemBase64) {
+    public synchronized int getWarehouseQuantity(String itemBase64) {
         return this.warehouseCache.getOrDefault(itemBase64, 0);
     }
 
     @Override
-    public boolean takeFromWarehouse(String itemBase64, int quantity) {
-        if (itemBase64 == null || quantity <= 0) {
+    public synchronized boolean takeFromWarehouse(String itemBase64, int quantity) {
+        if (!this.plugin.isStorageAvailable()
+            || itemBase64 == null || quantity <= 0) {
             return false;
         }
         int current = this.warehouseCache.getOrDefault(itemBase64, 0);
@@ -823,7 +992,7 @@ implements StorageManager {
     }
 
     @Override
-    public Map<String, Integer> getWarehouseSnapshot() {
+    public synchronized Map<String, Integer> getWarehouseSnapshot() {
         HashMap<String, Integer> snapshot = new HashMap<String, Integer>();
         for (Map.Entry<String, Integer> entry : this.warehouseCache.entrySet()) {
             if (entry.getKey().startsWith(PLAYER_WAREHOUSE_PREFIX) || entry.getValue() <= 0) {
@@ -834,50 +1003,28 @@ implements StorageManager {
         return snapshot;
     }
 
-    private boolean saveWarehouse() {
-        File temporary = new File(this.dataFolder, "warehouse.tmp-" + System.nanoTime());
-        File backup = new File(this.dataFolder, "warehouse.bak-" + System.nanoTime());
-        if (!temporary.mkdirs()) {
-            this.plugin.getLogger().severe("Failed to create temporary warehouse directory.");
-            return false;
-        }
-        int index = 0;
+    private synchronized boolean saveWarehouse() {
+        YamlConfiguration config = new YamlConfiguration();
+        config.set("version", FileWarehouseState.VERSION);
         try {
-            for (Map.Entry<String, Integer> entry : this.warehouseCache.entrySet()) {
-                if (entry.getValue() <= 0) continue;
-                File file = new File(temporary, index + ".yml");
-                YamlConfiguration config = new YamlConfiguration();
-                config.set("item_base64", (Object)entry.getKey());
-                config.set("quantity", (Object)entry.getValue());
-                config.save(file);
-                ++index;
-            }
-            if (this.warehouseFolder.exists()) {
-                this.movePath(this.warehouseFolder, backup);
-            }
-            try {
-                this.movePath(temporary, this.warehouseFolder);
-            }
-            catch (IOException replacementFailure) {
-                if (backup.exists()) {
-                    this.movePath(backup, this.warehouseFolder);
-                }
-                throw replacementFailure;
-            }
-            if (backup.exists() && !this.deleteTree(backup)) {
-                this.plugin.getLogger().warning("Failed to remove old warehouse backup: " + backup.getName());
-            }
-            return true;
-        }
-        catch (IOException e) {
-            this.plugin.getLogger().severe("Failed to save warehouse: " + e.getMessage());
+            config.set(
+                "entries",
+                FileWarehouseState.encode(
+                    new HashMap<String, Integer>(this.warehouseCache)
+                )
+            );
+        } catch (IllegalArgumentException exception) {
+            this.plugin.getLogger().severe(
+                "Refusing to save invalid warehouse state: "
+                    + exception.getMessage()
+            );
             return false;
         }
-        finally {
-            if (temporary.exists()) {
-                this.deleteTree(temporary);
-            }
-        }
+        return this.saveYamlAtomically(
+            this.warehouseStateFile,
+            config,
+            "warehouse state"
+        );
     }
 
     private void markItemEmptyState(String itemBase64) {
@@ -1063,8 +1210,10 @@ implements StorageManager {
     }
 
     @Override
-    public boolean addToMoneyWarehouse(String playerUuid, BigDecimal amount) {
-        if (playerUuid == null || amount == null || amount.compareTo(BigDecimal.ZERO) <= 0) {
+    public synchronized boolean addToMoneyWarehouse(String playerUuid, BigDecimal amount) {
+        if (!this.plugin.isStorageAvailable()
+            || playerUuid == null || amount == null
+            || amount.compareTo(BigDecimal.ZERO) <= 0) {
             return false;
         }
         BigDecimal previous = this.moneyWarehouseCache.getOrDefault(playerUuid, BigDecimal.ZERO);
@@ -1081,13 +1230,18 @@ implements StorageManager {
     }
 
     @Override
-    public BigDecimal getMoneyWarehouseBalance(String playerUuid) {
+    public synchronized BigDecimal getMoneyWarehouseBalance(String playerUuid) {
+        if (!this.plugin.isStorageAvailable() || playerUuid == null) {
+            return BigDecimal.ZERO;
+        }
         return this.moneyWarehouseCache.getOrDefault(playerUuid, BigDecimal.ZERO);
     }
 
     @Override
-    public boolean takeFromMoneyWarehouse(String playerUuid, BigDecimal amount) {
-        if (playerUuid == null || amount == null || amount.compareTo(BigDecimal.ZERO) <= 0) {
+    public synchronized boolean takeFromMoneyWarehouse(String playerUuid, BigDecimal amount) {
+        if (!this.plugin.isStorageAvailable()
+            || playerUuid == null || amount == null
+            || amount.compareTo(BigDecimal.ZERO) <= 0) {
             return false;
         }
         BigDecimal current = this.moneyWarehouseCache.getOrDefault(playerUuid, BigDecimal.ZERO);
@@ -1112,13 +1266,20 @@ implements StorageManager {
     }
 
     @Override
-    public boolean addToPlayerItemWarehouse(String playerUuid, String itemBase64, int quantity) {
-        if (playerUuid == null || itemBase64 == null || quantity <= 0) {
+    public synchronized boolean addToPlayerItemWarehouse(String playerUuid, String itemBase64, int quantity) {
+        if (!this.plugin.isStorageAvailable()
+            || playerUuid == null || itemBase64 == null || quantity <= 0) {
             return false;
         }
         String key = this.getPlayerWarehouseKey(playerUuid, itemBase64);
         int previous = this.warehouseCache.getOrDefault(key, 0);
-        this.warehouseCache.put(key, previous + quantity);
+        int updated;
+        try {
+            updated = Math.addExact(previous, quantity);
+        } catch (ArithmeticException exception) {
+            return false;
+        }
+        this.warehouseCache.put(key, updated);
         if (this.saveWarehouse()) {
             return true;
         }
@@ -1131,9 +1292,10 @@ implements StorageManager {
     }
 
     @Override
-    public Map<String, Integer> getPlayerItemWarehouse(String playerUuid) {
+    public synchronized Map<String, Integer> getPlayerItemWarehouse(String playerUuid) {
         HashMap<String, Integer> snapshot = new HashMap<String, Integer>();
-        if (playerUuid == null || playerUuid.isEmpty()) {
+        if (!this.plugin.isStorageAvailable()
+            || playerUuid == null || playerUuid.isEmpty()) {
             return snapshot;
         }
         String prefix = PLAYER_WAREHOUSE_PREFIX + playerUuid + "|";
@@ -1147,8 +1309,9 @@ implements StorageManager {
     }
 
     @Override
-    public boolean takeFromPlayerItemWarehouse(String playerUuid, String itemBase64, int quantity) {
-        if (playerUuid == null || itemBase64 == null || quantity <= 0) {
+    public synchronized boolean takeFromPlayerItemWarehouse(String playerUuid, String itemBase64, int quantity) {
+        if (!this.plugin.isStorageAvailable()
+            || playerUuid == null || itemBase64 == null || quantity <= 0) {
             return false;
         }
         String key = this.getPlayerWarehouseKey(playerUuid, itemBase64);
@@ -1169,6 +1332,9 @@ implements StorageManager {
     }
 
     private boolean saveMoneyWarehouse() {
+        if (!this.plugin.isStorageAvailable()) {
+            return false;
+        }
         File file = new File(this.dataFolder, "moneywarehouse.yml");
         YamlConfiguration config = new YamlConfiguration();
         int index = 0;
@@ -1185,6 +1351,10 @@ implements StorageManager {
     @Override
     public void withdrawWarehouse(Player player) {
         if (player == null) {
+            return;
+        }
+        if (this.isAssetDeliveryBlocked()) {
+            this.sendAssetDeliveryBlocked(player);
             return;
         }
         String playerUuid = player.getUniqueId().toString();
@@ -1243,6 +1413,10 @@ implements StorageManager {
         if (player == null) {
             return;
         }
+        if (this.isAssetDeliveryBlocked()) {
+            this.sendAssetDeliveryBlocked(player);
+            return;
+        }
         String playerUuid = player.getUniqueId().toString();
         BigDecimal moneyBalance = this.moneyWarehouseCache.getOrDefault(playerUuid, BigDecimal.ZERO);
         if (moneyBalance.compareTo(BigDecimal.ZERO) <= 0) {
@@ -1272,6 +1446,10 @@ implements StorageManager {
             if (player != null) {
                 player.sendMessage("\u00a7c\u65e0\u6548\u7684\u4ed3\u5e93\u7269\u54c1\u3002");
             }
+            return;
+        }
+        if (this.isAssetDeliveryBlocked()) {
+            this.sendAssetDeliveryBlocked(player);
             return;
         }
         String playerUuid = player.getUniqueId().toString();
@@ -1311,6 +1489,21 @@ implements StorageManager {
         }
     }
 
+    private boolean isAssetDeliveryBlocked() {
+        return !this.plugin.isStorageAvailable()
+            || this.plugin.isSettlementDeliveryBlocked();
+    }
+
+    private void sendAssetDeliveryBlocked(Player player) {
+        if (player != null) {
+            player.sendMessage(
+                this.plugin.isStorageAvailable()
+                    ? "\u00a7c\u4ea4\u6613\u7ed3\u7b97\u6b63\u5728\u6838\u9a8c\uff0c\u4ed3\u5e93\u8d44\u4ea7\u6682\u4e0d\u53ef\u63d0\u53d6\u3002"
+                    : "\u00a7c\u4ea4\u6613\u5e02\u573a\u5b58\u50a8\u6682\u4e0d\u53ef\u7528\uff0c\u8bf7\u7a0d\u540e\u518d\u8bd5\u3002"
+            );
+        }
+    }
+
     private boolean saveYamlAtomically(File target, YamlConfiguration config, String description) {
         File parent = target.getParentFile();
         if (parent != null && !parent.exists() && !parent.mkdirs()) {
@@ -1318,29 +1511,25 @@ implements StorageManager {
             return false;
         }
         File temporary = new File(parent, target.getName() + ".tmp-" + System.nanoTime());
-        File backup = new File(parent, target.getName() + ".bak-" + System.nanoTime());
-        boolean movedOld = false;
         try {
             config.save(temporary);
-            if (target.exists()) {
-                this.movePath(target, backup);
-                movedOld = true;
-            }
-            this.movePath(temporary, target);
-            if (movedOld && backup.exists() && !backup.delete()) {
-                this.plugin.getLogger().warning("Failed to remove old " + description + " backup.");
-            }
+            DurableFiles.replace(temporary.toPath(), target.toPath());
             return true;
         }
-        catch (IOException e) {
-            if (movedOld && !target.exists() && backup.exists()) {
-                try {
-                    this.movePath(backup, target);
-                }
-                catch (IOException restoreFailure) {
-                    e.addSuppressed(restoreFailure);
-                }
+        catch (DurableFiles.ReplaceException exception) {
+            if (exception.isTargetStateUncertain()) {
+                this.failClosed(
+                    "uncertain durable replacement for " + description,
+                    exception
+                );
             }
+            this.plugin.getLogger().severe(
+                "Failed to save " + description + ": "
+                    + exception.getMessage()
+            );
+            return false;
+        }
+        catch (IOException e) {
             this.plugin.getLogger().severe("Failed to save " + description + ": " + e.getMessage());
             return false;
         }
@@ -1348,36 +1537,137 @@ implements StorageManager {
             if (temporary.exists()) {
                 temporary.delete();
             }
-            if (backup.exists() && target.exists()) {
-                backup.delete();
-            }
         }
     }
 
     private void movePath(File source, File target) throws IOException {
-        Path sourcePath = source.toPath();
-        Path targetPath = target.toPath();
-        try {
-            Files.move(sourcePath, targetPath, StandardCopyOption.ATOMIC_MOVE);
+        DurableFiles.moveReplacing(source.toPath(), target.toPath());
+    }
+
+    private void forceWarehouseDirectory(File directory) throws IOException {
+        File[] files = directory.listFiles();
+        if (files == null) {
+            throw new IOException(
+                "failed to list warehouse directory for durability check"
+            );
         }
-        catch (AtomicMoveNotSupportedException e) {
-            Files.move(sourcePath, targetPath);
+        for (File file : files) {
+            if (!file.isFile()) {
+                throw new IOException(
+                    "unexpected nested path in warehouse directory: "
+                        + file.getName()
+                );
+            }
+            DurableFiles.forceFile(file.toPath());
+        }
+        DurableFiles.forceDirectoryIfSupported(directory.toPath());
+    }
+
+    private void recoverLegacyWarehouseDirectoryIfNeeded() {
+        if (this.legacyWarehouseFolder.exists()) {
+            return;
+        }
+        File[] backups = this.dataFolder.listFiles(
+            (directory, name) -> name.startsWith("warehouse.bak-")
+        );
+        if (backups == null) {
+            throw new IllegalStateException(
+                "Failed to enumerate legacy warehouse backups."
+            );
+        }
+        if (backups.length == 0) {
+            return;
+        }
+        File newest = null;
+        for (File backup : backups) {
+            if (!backup.isDirectory()) {
+                continue;
+            }
+            if (newest == null
+                || backup.lastModified() > newest.lastModified()
+                || (backup.lastModified() == newest.lastModified()
+                    && backup.getName().compareTo(newest.getName()) > 0)) {
+                newest = backup;
+            }
+        }
+        if (newest == null) {
+            return;
+        }
+        try {
+            this.movePath(newest, this.legacyWarehouseFolder);
+            this.forceWarehouseDirectory(this.legacyWarehouseFolder);
+            DurableFiles.forceDirectoryIfSupported(this.dataFolder.toPath());
+            this.plugin.getLogger().warning(
+                "[AssetAudit] Recovered legacy warehouse directory from "
+                    + newest.getName()
+            );
+        } catch (IOException exception) {
+            throw new IllegalStateException(
+                "Failed to recover interrupted legacy warehouse directory replacement",
+                exception
+            );
         }
     }
 
-    private boolean deleteTree(File directory) {
-        File[] children = directory.listFiles();
-        if (children != null) {
-            for (File child : children) {
-                if (child.isDirectory()) {
-                    if (!this.deleteTree(child)) {
-                        return false;
-                    }
-                } else if (!child.delete()) {
-                    return false;
-                }
-            }
+    private void archiveLegacyWarehouseDirectory() {
+        if (!this.legacyWarehouseFolder.exists()) {
+            return;
         }
-        return directory.delete() || !directory.exists();
+        if (!this.legacyWarehouseFolder.isDirectory()) {
+            throw new IllegalStateException(
+                "Legacy warehouse path is not a directory."
+            );
+        }
+        File archive = new File(
+            this.dataFolder,
+            "warehouse.migrated-" + System.currentTimeMillis()
+        );
+        int suffix = 0;
+        while (archive.exists()) {
+            archive = new File(
+                this.dataFolder,
+                "warehouse.migrated-" + System.currentTimeMillis()
+                    + "-" + ++suffix
+            );
+        }
+        try {
+            this.forceWarehouseDirectory(this.legacyWarehouseFolder);
+            this.movePath(this.legacyWarehouseFolder, archive);
+            DurableFiles.forceDirectoryIfSupported(this.dataFolder.toPath());
+            this.plugin.getLogger().info(
+                "Archived legacy warehouse directory as "
+                    + archive.getName()
+            );
+        } catch (IOException exception) {
+            throw new IllegalStateException(
+                "Failed to archive the migrated legacy warehouse directory.",
+                exception
+            );
+        }
     }
+
+    private boolean deleteFileDurably(File file, String description) {
+        if (!file.exists()) {
+            return true;
+        }
+        try {
+            Files.delete(file.toPath());
+            DurableFiles.forceDirectoryIfSupported(
+                file.toPath().toAbsolutePath().getParent()
+            );
+            return true;
+        } catch (IOException exception) {
+            this.plugin.getLogger().severe(
+                "Failed to delete " + description + ": "
+                    + exception.getMessage()
+            );
+            return false;
+        }
+    }
+
+    private void failClosed(String reason, Throwable cause) {
+        this.plugin.markStorageUnavailable(reason, cause);
+        throw new IllegalStateException(reason, cause);
+    }
+
 }
