@@ -912,9 +912,12 @@ public class OrderManager {
         );
         buyOrders.removeIf(order -> playerUuid.equals(order.getPlayerUuid()));
         SpecialCategory category = this.plugin.getItemManager().getSpecialCategory(exchangeItem);
-        int available = category != null
-            ? this.countCategoryItems(player, category)
-            : this.countSimilarItems(player, itemStack);
+        if (category != null) {
+            // 求购不支持特殊分类品种（Bug 修复）：分类条目只是出售侧的聚合展示，
+            // 不得把玩家背包中所有同分类物品当作一类求购单的可供货量。
+            return SupplyPlanner.plan(0, null);
+        }
+        int available = this.countSimilarItems(player, itemStack);
         return SupplyPlanner.plan(available, buyOrders);
     }
 
@@ -1094,24 +1097,6 @@ public class OrderManager {
             }
         }
         return distinct.isEmpty() ? null : distinct.values().iterator().next();
-    }
-
-    private int countCategoryItems(Player player, SpecialCategory category) {
-        if (player == null || category == null) {
-            return 0;
-        }
-        int total = 0;
-        PlayerInventory inventory = player.getInventory();
-        for (int slot = 0; slot < SlotRemovalPlan.STORAGE_SLOT_COUNT; ++slot) {
-            ItemStack stack = inventory.getItem(slot);
-            if (stack == null || stack.getType() == Material.AIR || MarketGuiItem.isMarked(stack)) {
-                continue;
-            }
-            if (SpecialCategory.of(stack) == category) {
-                total += stack.getAmount();
-            }
-        }
-        return total;
     }
 
     public synchronized String cancelOrder(Player player, int orderId) {

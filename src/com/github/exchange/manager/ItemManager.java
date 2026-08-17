@@ -79,6 +79,10 @@ public class ItemManager {
         return this.registerItem(item, creatorUuid, creatorName, true);
     }
 
+    /**
+     * 出售/补货侧注册：特殊分类（盔甲与工具/附魔书/药水/唱片）物品会归并到
+     * 对应分类条目。求购请使用 {@link #registerItemForBuy(Player, ItemStack)}。
+     */
     private ExchangeItem registerItem(
         ItemStack item,
         String creatorUuid,
@@ -89,6 +93,24 @@ public class ItemManager {
         if (special != null) {
             return special;
         }
+        return this.registerItemInternal(item, creatorUuid, creatorName, activateSellCatalog);
+    }
+
+    /** 求购专用注册：每个真实物品使用独立品种，不做特殊分类归并。 */
+    private ExchangeItem registerItemForBuyInternal(
+        ItemStack item,
+        String creatorUuid,
+        String creatorName
+    ) {
+        return this.registerItemInternal(item, creatorUuid, creatorName, false);
+    }
+
+    private ExchangeItem registerItemInternal(
+        ItemStack item,
+        String creatorUuid,
+        String creatorName,
+        boolean activateSellCatalog
+    ) {
         String displayName;
         String material = item.getType().name();
         String nbtHash = ItemSerializer.calculateNbtHash(item);
@@ -156,6 +178,51 @@ public class ItemManager {
             return exchangeItem;
         }
         return this.findEquivalentItem(item, material, nbtHash);
+    }
+
+    /**
+     * 求购专用注册入口：求购不使用出售侧的特殊分类合并，
+     * 每个真实物品必须拥有独立品种（避免求购错挂「盔甲与工具」等分类条目）。
+     * 沿用每日新增品种限制与管理员权限豁免。
+     */
+    public RegisterResult registerItemForBuy(Player player, ItemStack item) {
+        if (player == null || item == null || item.getType() == Material.AIR) {
+            return new RegisterResult(false, false, null, "\u00a7c\u65e0\u6548\u7684\u7269\u54c1\u3002");
+        }
+        if (this.plugin.isGrowthAccessRestricted(player)) {
+            return new RegisterResult(false, false, null, this.plugin.growthAccessMessage(player));
+        }
+        String material = item.getType().name();
+        String nbtHash = ItemSerializer.calculateNbtHash(item);
+        ExchangeItem existing = this.findEquivalentItem(item, material, nbtHash);
+        if (existing != null) {
+            return new RegisterResult(true, false, existing,
+                "\u00a7a\u8be5\u5546\u54c1\u5df2\u5728\u5e02\u573a\u76ee\u5f55\u4e2d\u3002");
+        }
+        if (!player.hasPermission("exchange.admin")) {
+            int used = this.plugin.getStorageManager().getDailyRegisterCount(
+                player.getUniqueId().toString(), LocalDate.now());
+            if (used >= this.plugin.getDailyRegisterLimit()) {
+                return new RegisterResult(false, false, null, "\u00a7c\u4f60\u4eca\u5929\u6700\u591a\u53ea\u80fd\u65b0\u589e "
+                    + this.plugin.getDailyRegisterLimit() + " \u79cd\u5546\u54c1\u3002");
+            }
+        }
+        ExchangeItem created = this.registerItemForBuyInternal(
+            item,
+            player.getUniqueId().toString(),
+            player.getName()
+        );
+        if (created == null) {
+            return new RegisterResult(false, false, null, "\u00a7c\u5546\u54c1\u76ee\u5f55\u6dfb\u52a0\u5931\u8d25\u3002");
+        }
+        if (!player.hasPermission("exchange.admin")) {
+            int used = this.plugin.getStorageManager().getDailyRegisterCount(
+                player.getUniqueId().toString(), LocalDate.now());
+            this.plugin.getStorageManager().setDailyRegisterCount(
+                player.getUniqueId().toString(), LocalDate.now(), used + 1);
+        }
+        return new RegisterResult(true, true, created,
+            "\u00a7a\u5df2\u5c06\u5546\u54c1\u52a0\u5165\u5e02\u573a\u76ee\u5f55\uff0c\u4f60\u73b0\u5728\u53ef\u4ee5\u53d1\u5e03\u6c42\u8d2d\u3002");
     }
 
     public RegisterResult registerOrRestock(Player player, ItemStack item, int quantity) {
@@ -546,13 +613,8 @@ public class ItemManager {
                 return item;
             }
         }
-        for (ExchangeItem item : this.plugin.getStorageManager().getAllExchangeItems()) {
-            ItemStack stack = ItemSerializer.itemFromBase64(item.getItemBase64());
-            if (stack == null || category != SpecialCategory.of(stack)) {
-                continue;
-            }
-            return this.markCategoryItem(item, category, stack);
-        }
+        // 只为分类创建独立的代表品种；不得把玩家已注册的同分类商品条目
+        // 吞噬改写为分类条目（否则会破坏历史订单匹配，如打火石条目被改成「盔甲与工具」）。
         ItemStack representative = category.createRepresentative();
         this.markCategoryItem(representative, category);
         String base64 = ItemSerializer.itemToBase64(representative);

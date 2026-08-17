@@ -373,6 +373,11 @@ implements Listener {
                 this.reopenAddMenu(player, buyOrder);
                 return;
             }
+            if (buyOrder) {
+                // 求购搜索进入结果菜单（原版物品 + 黏液科技物品，模糊/近似匹配）
+                ExchangeGUI.openBuySearchResultsMenu(this.plugin, player, query.trim(), 1);
+                return;
+            }
             ItemDatabase.ItemEntry entry = this.plugin.getItemDatabase().search(query.trim());
             if (entry == null) {
                 player.sendMessage("\u00a7c\u672a\u627e\u5230\u5339\u914d\u7684\u7269\u54c1\uff1a" + query.trim());
@@ -421,6 +426,10 @@ implements Listener {
                 if (query == null || query.isBlank()) {
                     player.sendMessage("\u00a7e\u641c\u7d22\u5173\u952e\u8bcd\u4e0d\u80fd\u4e3a\u7a7a\u3002");
                     this.reopenAddMenu(player, buyOrder);
+                    return;
+                }
+                if (buyOrder) {
+                    ExchangeGUI.openBedrockBuySearchResultsForm(this.plugin, player, query.trim(), 1);
                     return;
                 }
                 ItemDatabase.ItemEntry entry = this.plugin.getItemDatabase().search(query.trim());

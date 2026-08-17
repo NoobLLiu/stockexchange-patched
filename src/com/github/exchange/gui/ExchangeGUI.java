@@ -27,6 +27,7 @@ import com.github.exchange.model.ItemStatus;
 import com.github.exchange.model.Order;
 import com.github.exchange.model.Trade;
 import com.github.exchange.util.InventoryDelivery;
+import com.github.exchange.util.ItemDatabase;
 import com.github.exchange.util.ItemSerializer;
 import com.github.exchange.util.ItemDisplayNames;
 import com.github.exchange.util.MarketGuiItem;
@@ -82,6 +83,7 @@ implements Listener {
     private static final Map<UUID, HistoryView> guiHistoryViews = new HashMap<UUID, HistoryView>();
     private static final Map<UUID, Map<Integer, String>> guiWarehouseEntries = new HashMap<UUID, Map<Integer, String>>();
     private static final Map<UUID, String> guiSearchQueries = new HashMap<UUID, String>();
+    private static final Map<UUID, String> buySearchQueries = new HashMap<UUID, String>();
     private static final Map<UUID, Map<String, Integer>> listingPending = new HashMap<UUID, Map<String, Integer>>();
     private static final Map<UUID, BukkitTask> categoryIconRotationTasks = new HashMap<UUID, BukkitTask>();
     private static final Map<UUID, Inventory> categoryIconRotationInventories = new HashMap<UUID, Inventory>();
@@ -95,9 +97,11 @@ implements Listener {
     private static final String CURRENCY_EXCHANGE = "currency_exchange";
     private static final String ADD_ITEM = "add_item";
     private static final String ADD_BUY_ITEM = "add_buy_item";
+    private static final String BUY_SEARCH_RESULTS = "buy_search_results";
     private static final String LISTING = "listing";
     private static final String LISTING_PRICE = "listing_price";
     private static final String MARKET_PAGE_KEY = "market_page";
+    private static final String BUY_SEARCH_REF_KEY = "buy_search_ref";
     private static final String PAGE_PREV = "\u00a7e\u4e0a\u4e00\u9875";
     private static final String PAGE_NEXT = "\u00a7e\u4e0b\u4e00\u9875";
     private static final String BACK_TO_PREVIOUS = "\u00a7f\u8fd4\u56de\u4e0a\u4e00\u9875";
@@ -133,6 +137,10 @@ implements Listener {
 
     private static NamespacedKey categoryItemIdKey(StockExchangePlugin plugin) {
         return new NamespacedKey(plugin, "category_item_id");
+    }
+
+    private static NamespacedKey buySearchRefKey(StockExchangePlugin plugin) {
+        return new NamespacedKey(plugin, BUY_SEARCH_REF_KEY);
     }
 
     private static void readMarketPage(StockExchangePlugin plugin, Player player) {
@@ -1063,6 +1071,299 @@ implements Listener {
         ExchangeGUI.openAddBuyItemMenu(plugin, player, guiPage.getOrDefault(player.getUniqueId(), 1));
     }
 
+    public static void openBuySearchResultsMenu(
+        StockExchangePlugin plugin,
+        Player player,
+        String query,
+        int page
+    ) {
+        if (plugin.denyGrowthAccess(player)) {
+            return;
+        }
+        String trimmedQuery = query == null ? "" : query.trim();
+        if (trimmedQuery.isEmpty()) {
+            ExchangeGUI.openAddBuyItemMenu(plugin, player);
+            return;
+        }
+        buySearchQueries.put(player.getUniqueId(), trimmedQuery);
+        ExchangeGUI.openBuySearchResultsMenu(plugin, player, page);
+    }
+
+    private static void openBuySearchResultsMenu(StockExchangePlugin plugin, Player player, int page) {
+        if (plugin.denyGrowthAccess(player)) {
+            return;
+        }
+        UUID uuid = player.getUniqueId();
+        String query = buySearchQueries.get(uuid);
+        List<BuySearchCatalog.Source> results = ExchangeGUI.collectBuySearchSources(plugin, query);
+        String title = "\u00a76\u4ea4\u6613\u5e02\u573a - \u641c\u7d22\u6dfb\u52a0 - "
+            + ExchangeGUI.safeQueryForDisplay(query);
+        Inventory inv = Bukkit.createInventory(null, 54, title);
+        int pageSize = ITEM_LIST_PAGE_SIZE;
+        int totalPages = Math.max(1, (int)Math.ceil(results.size() / (double)pageSize));
+        int currentPage = Math.max(1, Math.min(page, totalPages));
+        int start = (currentPage - 1) * pageSize;
+        int end = Math.min(start + pageSize, results.size());
+        int slot = 0;
+        for (int index = start; index < end; ++index) {
+            ItemStack display = ExchangeGUI.createBuySearchResultIcon(plugin, results.get(index));
+            if (display == null) {
+                continue;
+            }
+            inv.setItem(slot++, display);
+        }
+        if (results.isEmpty()) {
+            inv.setItem(22, ExchangeGUI.createItem(
+                Material.BARRIER,
+                "\u00a7c\u672a\u627e\u5230\u5339\u914d\u7684\u7269\u54c1",
+                "\u00a77\u641c\u7d22\u5173\u952e\u8bcd: \u00a7f" + ExchangeGUI.safeQueryForDisplay(query),
+                "\u00a77\u8bf7\u5c1d\u8bd5\u66f4\u77ed\u6216\u66f4\u6a21\u7cca\u7684\u5173\u952e\u8bcd\u3002"
+            ));
+        }
+        for (int separatorSlot = ITEM_LIST_SEPARATOR_START_SLOT;
+            separatorSlot <= ITEM_LIST_SEPARATOR_END_SLOT;
+            ++separatorSlot) {
+            inv.setItem(separatorSlot, ExchangeGUI.createItem(
+                new ItemStack(Material.GRAY_STAINED_GLASS_PANE),
+                "\u00a77",
+                new String[]{null}
+            ));
+        }
+        inv.setItem(ITEM_LIST_PREV_SLOT, ExchangeGUI.navigationItem(
+            PAGE_PREV,
+            currentPage > 1,
+            "\u00a77\u7b2c " + currentPage + "/" + totalPages + " \u9875"
+        ));
+        inv.setItem(ITEM_LIST_NEXT_SLOT, ExchangeGUI.navigationItem(
+            PAGE_NEXT,
+            currentPage < totalPages,
+            "\u00a77\u7b2c " + currentPage + "/" + totalPages + " \u9875"
+        ));
+        inv.setItem(ITEM_LIST_BACK_SLOT, ExchangeGUI.createItemWithModelData(
+            Material.ARROW,
+            "\u00a7f\u8fd4\u56de\u6dfb\u52a0\u6c42\u8d2d\u9875\u9762",
+            2400013,
+            "\u00a77\u8fd4\u56de\u6c42\u8d2d\u7269\u54c1\u9009\u62e9\u9875\u9762"
+        ));
+        guiState.put(uuid, BUY_SEARCH_RESULTS);
+        guiItemId.remove(uuid);
+        guiPage.put(uuid, currentPage);
+        player.openInventory(inv);
+    }
+
+    private static List<BuySearchCatalog.Source> collectBuySearchSources(
+        StockExchangePlugin plugin,
+        String query
+    ) {
+        List<BuySearchCatalog.Source> vanilla = new ArrayList<BuySearchCatalog.Source>();
+        List<BuySearchCatalog.Source> catalog = new ArrayList<BuySearchCatalog.Source>();
+        ItemDatabase database = plugin.getItemDatabase();
+        if (database != null) {
+            for (ItemDatabase.ItemEntry entry : database.searchAll(query)) {
+                if (entry == null || entry.getId() == null) {
+                    continue;
+                }
+                vanilla.add(new BuySearchCatalog.Source(
+                    entry.getId(),
+                    entry.getName(),
+                    entry.getId().toUpperCase(Locale.ROOT),
+                    false,
+                    null
+                ));
+            }
+        }
+        for (ExchangeItem item : plugin.getItemManager().getAllItems()) {
+            if (item == null || plugin.getItemManager().getSpecialCategory(item) != null) {
+                continue;
+            }
+            String displayName = item.getDisplayName();
+            if (displayName == null || displayName.isEmpty()) {
+                displayName = item.getItemName();
+            }
+            ItemStack stack = ItemSerializer.itemFromBase64(item.getItemBase64());
+            if (stack != null) {
+                String resolved = ItemDisplayNames.resolve(stack);
+                if (resolved != null && !resolved.isEmpty()) {
+                    displayName = resolved;
+                }
+            }
+            catalog.add(new BuySearchCatalog.Source(
+                String.valueOf(item.getId()),
+                displayName,
+                item.getMaterial(),
+                true,
+                item
+            ));
+        }
+        return BuySearchCatalog.search(query, vanilla, catalog);
+    }
+
+    private static ItemStack createBuySearchResultIcon(
+        StockExchangePlugin plugin,
+        BuySearchCatalog.Source source
+    ) {
+        if (source == null) {
+            return null;
+        }
+        ItemStack base;
+        if (source.catalog) {
+            if (source.marketItem == null) {
+                return null;
+            }
+            base = ItemSerializer.itemFromBase64(source.marketItem.getItemBase64());
+        } else {
+            ItemDatabase database = plugin.getItemDatabase();
+            if (database == null) {
+                return null;
+            }
+            ItemDatabase.ItemEntry entry = database.findById(source.id);
+            if (entry == null) {
+                return null;
+            }
+            Material material = database.resolveMaterial(entry);
+            if (material == null) {
+                return null;
+            }
+            base = new ItemStack(material, 1);
+        }
+        if (base == null || base.getType() == Material.AIR) {
+            return null;
+        }
+        ItemStack display = ExchangeGUI.createMarketVoucher(base, source.displayName);
+        ItemMeta meta = display.getItemMeta();
+        if (meta == null) {
+            return null;
+        }
+        ArrayList<String> lore = new ArrayList<String>();
+        if (meta.hasLore() && meta.getLore() != null) {
+            lore.addAll(meta.getLore());
+        }
+        lore.add("");
+        lore.add("\u00a77ID: \u00a7f" + (source.catalog ? String.valueOf(source.marketItem.getId()) : source.id));
+        lore.add(source.catalog
+            ? "\u00a77\u5df2\u5728\u5e02\u573a\u76ee\u5f55\u4e2d\uff0c\u70b9\u51fb\u53d1\u5e03\u6c42\u8d2d"
+            : "\u00a77\u70b9\u51fb\u53d1\u5e03\u6c42\u8d2d");
+        meta.setLore(lore);
+        meta.getPersistentDataContainer().set(
+            ExchangeGUI.buySearchRefKey(plugin),
+            PersistentDataType.STRING,
+            source.catalog ? ("catalog:" + source.marketItem.getId()) : ("vanilla:" + source.id)
+        );
+        display.setItemMeta(meta);
+        return display;
+    }
+
+    private static void handleBuySearchResultClick(StockExchangePlugin plugin, Player player, String ref) {
+        if (ref == null || ref.isEmpty()) {
+            return;
+        }
+        if (ref.startsWith("vanilla:")) {
+            String vanillaId = ref.substring("vanilla:".length());
+            ItemDatabase database = plugin.getItemDatabase();
+            if (database == null) {
+                return;
+            }
+            ItemDatabase.ItemEntry entry = database.findById(vanillaId);
+            if (entry == null) {
+                return;
+            }
+            ItemStack base = database.createItemStack(entry);
+            if (base == null) {
+                return;
+            }
+            ItemManager.RegisterResult result = plugin.getItemManager().registerItemForBuy(player, base);
+            player.sendMessage(result.getMessage());
+            if (result.isSuccess() && result.getItem() != null) {
+                plugin.getChatInputHandler().startBuyInput(player, result.getItem());
+            }
+            return;
+        }
+        if (ref.startsWith("catalog:")) {
+            int itemId;
+            try {
+                itemId = Integer.parseInt(ref.substring("catalog:".length()));
+            } catch (NumberFormatException ex) {
+                return;
+            }
+            ExchangeItem item = plugin.getItemManager().getItem(itemId);
+            if (item == null) {
+                player.sendMessage("\u00a7c\u8be5\u5546\u54c1\u5df2\u4e0d\u5b58\u5728\uff0c\u8bf7\u91cd\u65b0\u641c\u7d22\u3002");
+                ExchangeGUI.openAddBuyItemMenu(plugin, player);
+                return;
+            }
+            plugin.getChatInputHandler().startBuyInput(player, item);
+        }
+    }
+
+    public static void openBedrockBuySearchResultsForm(
+        StockExchangePlugin plugin,
+        Player player,
+        String query,
+        int page
+    ) {
+        if (plugin.denyGrowthAccess(player)) {
+            return;
+        }
+        String trimmedQuery = query == null ? "" : query.trim();
+        if (trimmedQuery.isEmpty()) {
+            ExchangeGUI.openAddBuyItemMenu(plugin, player);
+            return;
+        }
+        buySearchQueries.put(player.getUniqueId(), trimmedQuery);
+        List<BuySearchCatalog.Source> results = ExchangeGUI.collectBuySearchSources(plugin, trimmedQuery);
+        int pageSize = 20;
+        int totalPages = Math.max(1, (int)Math.ceil(results.size() / (double)pageSize));
+        int currentPage = Math.max(1, Math.min(page, totalPages));
+        int start = (currentPage - 1) * pageSize;
+        int end = Math.min(start + pageSize, results.size());
+        SimpleForm.Builder builder = SimpleForm.builder()
+            .title("\u641c\u7d22\u6dfb\u52a0\u7ed3\u679c - " + ExchangeGUI.safeQueryForDisplay(trimmedQuery));
+        Map<Integer, String> refs = new HashMap<Integer, String>();
+        int resultCount = results.isEmpty() ? 1 : (end - start);
+        int buttonIndex = 0;
+        for (int index = start; index < end; ++index) {
+            BuySearchCatalog.Source source = results.get(index);
+            String ref = source.catalog
+                ? ("catalog:" + source.marketItem.getId())
+                : ("vanilla:" + source.id);
+            refs.put(buttonIndex, ref);
+            builder.button(source.displayName + (source.catalog ? " \u00a77(\u5df2\u5728\u76ee\u5f55)" : ""));
+            ++buttonIndex;
+        }
+        if (results.isEmpty()) {
+            builder.button("\u00a7c\u672a\u627e\u5230\u5339\u914d\u7684\u7269\u54c1");
+        }
+        builder.button("\u4e0a\u4e00\u9875")
+            .button("\u4e0b\u4e00\u9875")
+            .button("\u8fd4\u56de\u6dfb\u52a0\u6c42\u8d2d")
+            .validResultHandler(response -> Bukkit.getScheduler().runTask(plugin, () -> {
+                int clicked = response.clickedButtonId();
+                if (clicked < 0) {
+                    return;
+                }
+                if (clicked < resultCount) {
+                    String ref = refs.get(clicked);
+                    if (ref != null) {
+                        ExchangeGUI.handleBuySearchResultClick(plugin, player, ref);
+                    }
+                    return;
+                }
+                int navIndex = clicked - resultCount;
+                if (navIndex == 0) {
+                    ExchangeGUI.openBedrockBuySearchResultsForm(plugin, player, trimmedQuery, currentPage - 1);
+                } else if (navIndex == 1) {
+                    ExchangeGUI.openBedrockBuySearchResultsForm(plugin, player, trimmedQuery, currentPage + 1);
+                } else {
+                    ExchangeGUI.openAddBuyItemMenu(plugin, player);
+                }
+            }))
+            .closedResultHandler(() -> Bukkit.getScheduler().runTask(
+                plugin,
+                () -> ExchangeGUI.openAddBuyItemMenu(plugin, player)
+            ));
+        FloodgateApi.getInstance().sendForm(player.getUniqueId(), builder);
+    }
+
     private static void openItemSelectionMenu(
         StockExchangePlugin plugin,
         Player player,
@@ -1091,7 +1392,7 @@ implements Listener {
             inv.setItem(22, ExchangeGUI.createItem(
                 Material.NAME_TAG,
                 "\u00a7e\u641c\u7d22\u6dfb\u52a0",
-                "\u00a77\u8f93\u5165\u7269\u54c1\u540d\u79f0\u6216 ID \u641c\u7d22\u6240\u6709\u539f\u7248\u7269\u54c1",
+                "\u00a77\u8f93\u5165\u7269\u54c1\u540d\u79f0\u6216 ID\uff0c\u641c\u7d22\u539f\u7248\u4e0e\u9ecf\u6db2\u79d1\u6280\u7269\u54c1",
                 "\u00a77\u70b9\u51fb\u6253\u5f00\u641c\u7d22\u8f93\u5165"
             ));
         }
@@ -2455,6 +2756,34 @@ implements Listener {
                 ExchangeGUI.openItemList(plugin, clicker);
                 break;
             }
+            case "buy_search_results": {
+                if (displayName.contains(PAGE_PREV)) {
+                    if (isDisabledNavigation(meta, 2400061)) break;
+                    guiNavigating.put(uuid, true);
+                    ExchangeGUI.openBuySearchResultsMenu(plugin, clicker, guiPage.getOrDefault(uuid, 1) - 1);
+                    break;
+                }
+                if (displayName.contains(PAGE_NEXT)) {
+                    if (isDisabledNavigation(meta, 2400062)) break;
+                    guiNavigating.put(uuid, true);
+                    ExchangeGUI.openBuySearchResultsMenu(plugin, clicker, guiPage.getOrDefault(uuid, 1) + 1);
+                    break;
+                }
+                if (event.getRawSlot() == ITEM_LIST_BACK_SLOT && rawSlotIsTopInventory(event, 54)) {
+                    guiNavigating.put(uuid, true);
+                    ExchangeGUI.openAddBuyItemMenu(plugin, clicker);
+                    break;
+                }
+                String buySearchRef = meta.getPersistentDataContainer().get(
+                    ExchangeGUI.buySearchRefKey(plugin),
+                    PersistentDataType.STRING
+                );
+                if (buySearchRef != null && !buySearchRef.isEmpty()) {
+                    guiNavigating.put(uuid, true);
+                    ExchangeGUI.handleBuySearchResultClick(plugin, clicker, buySearchRef);
+                }
+                break;
+            }
             case "add_item":
             case "add_buy_item": {
                 if (displayName.contains("\u8fd4\u56de")) {
@@ -2538,6 +2867,7 @@ implements Listener {
         bulkBuyMode.remove(uuid);
         guiWarehouseEntries.remove(uuid);
         guiSearchQueries.remove(uuid);
+        buySearchQueries.remove(uuid);
         listingPending.remove(uuid);
     }
 
@@ -2561,6 +2891,7 @@ implements Listener {
         buyMode.remove(uuid);
         guiWarehouseEntries.remove(uuid);
         guiSearchQueries.remove(uuid);
+        buySearchQueries.remove(uuid);
         listingPending.remove(uuid);
     }
 
@@ -2578,11 +2909,9 @@ implements Listener {
         }
         ItemStack preview = source.clone();
         preview.setAmount(1);
-        ItemManager.RegisterResult result = plugin.getItemManager().registerCatalogItem(
-            player,
-            preview,
-            !buyOrder
-        );
+        ItemManager.RegisterResult result = buyOrder
+            ? plugin.getItemManager().registerItemForBuy(player, preview)
+            : plugin.getItemManager().registerCatalogItem(player, preview, true);
         player.sendMessage(result.getMessage());
         if (!result.isSuccess()) {
             return;
