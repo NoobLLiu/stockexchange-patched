@@ -127,10 +127,10 @@ Map<String, Object> result = web.placeBuy(uuid, itemId, price, quantity);
 
 ```powershell
 # StockExchange
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File D:\java-server\dev\local-plugins\stockexchange-patched\build.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File D:\java-server\dev-plugins\stockexchange-patched\build.ps1
 # StarCityBridge（Maven 构建，systemPath 已指向当前仓库构建产物）
 $env:JAVA_HOME='D:\java-server\StarCIty\runtime\jdk25\jdk-25.0.3'
-D:\java-server\dev\work\apache-maven-3.9.11\bin\mvn.cmd -f D:\java-server\dev\local-plugins\StarCityBridge\pom.xml package
+D:\java-server\dev\work\apache-maven-3.9.11\bin\mvn.cmd -f D:\java-server\dev-plugins\StarCityBridge\pom.xml package
 ```
 
 产物：`stockexchange-patched\build\StockExchange-1.0.0-gmzc.jar`、

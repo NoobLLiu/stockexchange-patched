@@ -1,8 +1,10 @@
 $ErrorActionPreference = 'Stop'
 
 $projectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
-$devRoot = Split-Path -Parent (Split-Path -Parent $projectRoot)
-$serverRoot = Join-Path (Split-Path -Parent $devRoot) 'StarCIty'
+$devPluginsRoot = Split-Path -Parent $projectRoot
+$workspaceRoot = Split-Path -Parent $devPluginsRoot
+$devRoot = Join-Path $workspaceRoot 'dev'
+$serverRoot = Join-Path $workspaceRoot 'StarCIty'
 $javaHome = Join-Path $serverRoot 'runtime\jdk25\jdk-25.0.3'
 $buildRoot = Join-Path $projectRoot 'build'
 $pluginOut = Join-Path $buildRoot 'plugin-classes'
