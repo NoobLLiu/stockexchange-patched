@@ -228,6 +228,7 @@ public class WebMarketManager {
             "page_size", pageSize,
             "total_pages", totalPages,
             "total_items", items.size(),
+            "total", items.size(),
             "buy_page", buyPage,
             "query", query == null ? "" : query
         ));
@@ -335,6 +336,9 @@ public class WebMarketManager {
         Map<String, Object> data = new LinkedHashMap<String, Object>();
         data.put("bids", aggregateLevels(buys, false));
         data.put("asks", aggregateLevels(sells, true));
+        data.put("item_id", itemId);
+        data.put("buys", data.get("bids"));
+        data.put("sells", data.get("asks"));
         List<Map<String, Object>> bidViews = new ArrayList<Map<String, Object>>();
         List<Map<String, Object>> askViews = new ArrayList<Map<String, Object>>();
         for (Order order : buys) {
@@ -350,16 +354,16 @@ public class WebMarketManager {
         return ok(data);
     }
 
-    /** 我的挂单。 */
-    public Map<String, Object> myOrders(String uuid) {
+    /** 我的挂单（网页端直接返回数组，与前端契约一致）。 */
+    public List<Map<String, Object>> myOrders(String uuid) {
         List<Map<String, Object>> list = new ArrayList<Map<String, Object>>();
         for (Order order : plugin.getOrderManager().getPlayerOrders(uuid)) {
             list.add(orderView(order));
         }
-        return ok(map("orders", list));
+        return list;
     }
 
-    /** 我的成交（分页）。 */
+    /** 我的成交（分页；与游戏内“买入/卖出记录”一致，取本人最近最多 200 条）。 */
     public Map<String, Object> myTrades(String uuid, int page, int size) {
         if (page < 1) {
             page = 1;
@@ -367,12 +371,24 @@ public class WebMarketManager {
         if (size < 1 || size > 100) {
             size = 20;
         }
-        List<Trade> trades = plugin.getStorageManager().getTradesByPlayer(uuid, size, (page - 1) * size);
+        List<Trade> trades = plugin.getStorageManager().getTradesByPlayer(uuid, 200, 0);
+        int totalPages = Math.max(1, (trades.size() + size - 1) / size);
+        int currentPage = Math.min(page, totalPages);
+        int start = (currentPage - 1) * size;
+        int end = Math.min(start + size, trades.size());
         List<Map<String, Object>> list = new ArrayList<Map<String, Object>>();
-        for (Trade trade : trades) {
-            list.add(tradeView(trade, uuid));
+        for (int index = start; index < end; ++index) {
+            list.add(tradeView(trades.get(index), uuid));
         }
-        return ok(map("trades", list, "page", page, "size", size));
+        return ok(map(
+            "trades", list,
+            "items", list,
+            "page", currentPage,
+            "page_size", size,
+            "size", size,
+            "total", trades.size(),
+            "total_pages", totalPages
+        ));
     }
 
     /** 我的交易记录页：与游戏内“我的交易记录”相同（挂单在前、成交在后，合并分页）。 */
@@ -422,24 +438,52 @@ public class WebMarketManager {
             ItemStack stack = ItemSerializer.itemFromBase64(entry.getKey());
             Map<String, Object> view = new LinkedHashMap<String, Object>();
             view.put("item_base64", entry.getKey());
+            view.put("item_id", entry.getKey());
             view.put("quantity", entry.getValue());
-            view.put("display_name", stack == null ? "\u672a\u77e5\u7269\u54c1" : ItemDisplayNames.resolve(stack));
+            String displayName = stack == null ? "\u672a\u77e5\u7269\u54c1" : ItemDisplayNames.resolve(stack);
+            view.put("display_name", displayName);
+            view.put("name", displayName);
             view.put("material", stack == null ? null : stack.getType().name());
             items.add(view);
         }
+        BigDecimal moneyBalance = plugin.getStorageManager().getMoneyWarehouseBalance(uuid);
+        BigDecimal balance = safeBalance(uuid);
         return ok(map(
             "items", items,
-            "money_balance", plugin.getStorageManager().getMoneyWarehouseBalance(uuid),
+            "money_balance", moneyBalance,
+            "money", moneyBalance,
+            "balance", balance,
+            "currency_name", plugin.getCurrencyName(),
+            "economy_available", balance != null,
             "hint", "\u7f51\u9875\u4e0b\u5355\u4f7f\u7528\u4ed3\u5e93\u8d44\u91d1/\u7269\u54c1\uff1b\u63d0\u53d6\u5230\u6e38\u620f\u80cc\u5305\u9700\u8981\u73a9\u5bb6\u5728\u7ebf\u65f6\u8c03\u7528 warehouse_withdraw_*"
         ));
+    }
+
+    /** 我的经济余额（经 Vault/XConomy 读取）与货币仓库余额，用于网页展示。 */
+    public Map<String, Object> myBalance(String uuid) {
+        if (!validUuid(uuid)) {
+            return fail("无效的玩家 UUID");
+        }
+        BigDecimal balance = safeBalance(uuid);
+        Map<String, Object> data = new LinkedHashMap<String, Object>();
+        data.put("uuid", uuid);
+        data.put("balance", balance);
+        data.put("currency_name", plugin.getCurrencyName());
+        data.put("economy_available", balance != null);
+        data.put("warehouse_money", plugin.getStorageManager().getMoneyWarehouseBalance(uuid));
+        return ok(data);
     }
 
     /** 市场信息（税率/货币/兑换比例/公告/涨跌停/限价等）。 */
     public Map<String, Object> marketInfo() {
         BigDecimal tax = TaxCalculator.tax(plugin.getDiamondToMoneyAmount(), plugin.getTaxRatePercent());
+        List<String> announcements = plugin.getAnnouncements();
+        String noticeText = announcements == null || announcements.isEmpty()
+            ? "" : String.join("\n", announcements);
         return ok(map(
             "currency_name", plugin.getCurrencyName(),
             "tax_rate_percent", plugin.getTaxRatePercent(),
+            "tax_rate", plugin.getTaxRatePercent(),
             "diamond_to_money", plugin.getDiamondToMoneyAmount(),
             "diamond_exchange_tax", tax,
             "diamond_exchange_received", TaxCalculator.afterTax(plugin.getDiamondToMoneyAmount(), plugin.getTaxRatePercent()),
@@ -452,7 +496,9 @@ public class WebMarketManager {
             "min_price", plugin.getMinPrice(),
             "max_price", plugin.getMaxPrice(),
             "order_expire_days", plugin.getOrderExpireDays(),
-            "announcements", plugin.getAnnouncements()
+            "announcements", announcements,
+            "notice", noticeText,
+            "announcement", noticeText
         ));
     }
 
@@ -1086,8 +1132,11 @@ public class WebMarketManager {
 
     // ===================== 管理员接口 =====================
 
-    /** 管理员：停牌/复牌。 */
-    public Map<String, Object> adminSuspend(int itemId, boolean suspend) {
+    /** 管理员：停牌/复牌（admin 标志对应服务器管理员，与游戏内权限一致）。 */
+    public Map<String, Object> adminSuspend(boolean admin, int itemId, boolean suspend) {
+        if (!admin) {
+            return fail("需要管理员权限");
+        }
         return onMain(new Callable<Map<String, Object>>() {
             public Map<String, Object> call() {
                 ItemStatus status = plugin.getItemManager().getItemStatus(itemId);
@@ -1102,7 +1151,10 @@ public class WebMarketManager {
     }
 
     /** 管理员：设置税率（0-100）。 */
-    public Map<String, Object> adminSetTax(BigDecimal percent) {
+    public Map<String, Object> adminSetTax(boolean admin, BigDecimal percent) {
+        if (!admin) {
+            return fail("需要管理员权限");
+        }
         return onMain(new Callable<Map<String, Object>>() {
             public Map<String, Object> call() {
                 if (!plugin.setTaxRatePercent(percent)) {
@@ -1114,7 +1166,10 @@ public class WebMarketManager {
     }
 
     /** 管理员：公告管理 add / edit / delete / addline / delline。 */
-    public Map<String, Object> adminAnnouncement(String action, int id, String content) {
+    public Map<String, Object> adminAnnouncement(boolean admin, String action, int id, String content) {
+        if (!admin) {
+            return fail("需要管理员权限");
+        }
         return onMain(new Callable<Map<String, Object>>() {
             public Map<String, Object> call() {
                 if ("add".equalsIgnoreCase(action)) {
@@ -1165,7 +1220,10 @@ public class WebMarketManager {
     }
 
     /** 管理员：重载配置并重连数据库。 */
-    public Map<String, Object> adminReload() {
+    public Map<String, Object> adminReload(boolean admin) {
+        if (!admin) {
+            return fail("需要管理员权限");
+        }
         return onMain(new Callable<Map<String, Object>>() {
             public Map<String, Object> call() {
                 plugin.loadConfigValues();
@@ -1176,7 +1234,10 @@ public class WebMarketManager {
     }
 
     /** 管理员：重连数据库。 */
-    public Map<String, Object> adminReconnectDb() {
+    public Map<String, Object> adminReconnectDb(boolean admin) {
+        if (!admin) {
+            return fail("需要管理员权限");
+        }
         return onMain(new Callable<Map<String, Object>>() {
             public Map<String, Object> call() {
                 return ok(map("reconnected", plugin.reconnectStorage()));
@@ -1244,8 +1305,10 @@ public class WebMarketManager {
     private Map<String, Object> itemView(ExchangeItem item, boolean buyPage) {
         Map<String, Object> view = new LinkedHashMap<String, Object>();
         view.put("id", item.getId());
+        view.put("item_id", String.valueOf(item.getId()));
         view.put("material", item.getMaterial());
         view.put("display_name", item.getDisplayName());
+        view.put("name", item.getDisplayName() != null ? item.getDisplayName() : item.getItemName());
         view.put("item_name", item.getItemName());
         view.put("item_lore", item.getItemLore());
         view.put("created_by", item.getCreatedByName());
@@ -1257,6 +1320,7 @@ public class WebMarketManager {
             view.put("high_today", status.getHighToday());
             view.put("low_today", status.getLowToday());
             view.put("volume_today", status.getVolumeToday());
+            view.put("volume", status.getVolumeToday());
             view.put("suspended", status.isSuspended());
             view.put("lowest_sell", status.getLowestSellCurrent());
         }
@@ -1295,7 +1359,9 @@ public class WebMarketManager {
     private Map<String, Object> orderView(Order order) {
         Map<String, Object> view = new LinkedHashMap<String, Object>();
         view.put("id", order.getId());
+        view.put("order_id", order.getId());
         view.put("order_type", order.getOrderType().name());
+        view.put("type", order.getOrderType() == Order.OrderType.BUY ? "buy" : "sell");
         view.put("item_id", order.getItemId());
         view.put("player_uuid", order.getPlayerUuid());
         view.put("player_name", order.getPlayerName());
@@ -1306,12 +1372,14 @@ public class WebMarketManager {
         view.put("status", order.getStatus().name());
         view.put("created_at", order.getCreatedAt());
         view.put("item_name", resolveItemName(order.getItemId()));
+        view.put("name", resolveItemName(order.getItemId()));
         return view;
     }
 
     private Map<String, Object> tradeView(Trade trade, String viewerUuid) {
         Map<String, Object> view = new LinkedHashMap<String, Object>();
         view.put("id", trade.getId());
+        view.put("trade_id", trade.getId());
         view.put("item_id", trade.getItemId());
         view.put("buyer_uuid", trade.getBuyerUuid());
         view.put("seller_uuid", trade.getSellerUuid());
@@ -1323,12 +1391,15 @@ public class WebMarketManager {
         view.put("traded_at", trade.getTradedAt());
         view.put("buy_order_id", trade.getBuyOrderId());
         view.put("sell_order_id", trade.getSellOrderId());
+        view.put("time", trade.getTradedAt());
         if (viewerUuid != null) {
             boolean isBuy = viewerUuid.equalsIgnoreCase(trade.getBuyerUuid());
             view.put("role", isBuy ? "BUYER" : "SELLER");
+            view.put("type", isBuy ? "buy" : "sell");
             view.put("fee", isBuy ? trade.getBuyerFee() : trade.getSellerFee());
         }
         view.put("item_name", resolveItemName(trade.getItemId()));
+        view.put("name", resolveItemName(trade.getItemId()));
         return view;
     }
 
@@ -1458,6 +1529,19 @@ public class WebMarketManager {
             return true;
         } catch (IllegalArgumentException e) {
             return false;
+        }
+    }
+
+    /** 读取玩家经济余额（经 Vault 桥接 XConomy）；经济不可用或异常时返回 null，不抛错。 */
+    private BigDecimal safeBalance(String uuid) {
+        if (!validUuid(uuid)) {
+            return null;
+        }
+        try {
+            BigDecimal balance = EconomyUtil.getBalance(parseUuid(uuid));
+            return balance == null ? null : balance;
+        } catch (Throwable ignored) {
+            return null;
         }
     }
 
