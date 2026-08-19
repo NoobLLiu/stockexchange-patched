@@ -24,7 +24,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: residence
-          path: target/Residence6.0.2.2.jar
+          path: target/Residence*.jar
 
   release:
     runs-on: ubuntu-latest
@@ -41,8 +41,6 @@ jobs:
           path: build/deps
       - name: Build plugin
         run: bash ci/build.sh
-        env:
-          RESIDENCE_JAR: build/deps/Residence6.0.2.2.jar
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:

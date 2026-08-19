@@ -21,7 +21,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: residence
-          path: target/Residence6.0.2.2.jar
+          path: target/Residence*.jar
 
   build:
     runs-on: ubuntu-latest
@@ -39,7 +39,7 @@ jobs:
       - name: Build plugin
         run: bash ci/build.sh
         env:
-          RESIDENCE_JAR: build/deps/Residence6.0.2.2.jar
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:

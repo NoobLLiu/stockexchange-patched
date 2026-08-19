@@ -13,11 +13,16 @@ esac
 cd "$(dirname "$0")/.."
 
 MVN="${MVN:-mvn}"
-RESIDENCE_JAR="${RESIDENCE_JAR:-build/deps/Residence6.0.2.2.jar}"
-if [ ! -f "$RESIDENCE_JAR" ]; then
-    echo "缺少 Residence 构建产物：$RESIDENCE_JAR（请先从 Zrips/Residence 源码 mvn package）" >&2
+# Residence jar 自动发现：优先取 RESIDENCE_JAR 传入路径，否则在 build/deps 下按 Residence*.jar 匹配
+RESIDENCE_JAR="${RESIDENCE_JAR:-}"
+if [ -z "$RESIDENCE_JAR" ] || [ ! -f "$RESIDENCE_JAR" ]; then
+    RESIDENCE_JAR=$(find build/deps -maxdepth 1 -name 'Residence*.jar' 2>/dev/null | head -1 || true)
+fi
+if [ -z "$RESIDENCE_JAR" ] || [ ! -f "$RESIDENCE_JAR" ]; then
+    echo "缺少 Residence 构建产物（请先从 Zrips/Residence 源码 mvn package 后放入 build/deps）" >&2
     exit 1
 fi
+echo "使用 Residence: $RESIDENCE_JAR"
 
 rm -rf build/ci-lib build/stub-classes build/ci-stubs.jar build/plugin-classes build/test-classes build/StockExchange-1.0.0-gmzc.jar
 mkdir -p build/ci-lib build/stub-classes build/plugin-classes build/test-classes
