@@ -68,7 +68,15 @@ import org.bukkit.scheduler.BukkitTask;
 
 public final class AutoWarehouseManager implements Listener {
     private static final String NO_CHEST_MESSAGE = "§c请站在任意箱子上再使用该按钮";
-    private static final long PERIODIC_RECONCILE_TICKS = 20L;
+    /*
+     * Inventory events can arrive once for every hopper transfer.  Reconciling
+     * the entire chest on every event serializes every stack and writes each
+     * changed order synchronously. Sell warehouses instead reconcile on the
+     * five-second periodic pass; buy warehouses still coalesce their delivery
+     * events before syncing.
+     */
+    private static final long PERIODIC_RECONCILE_TICKS = 100L;
+    private static final long EVENT_SYNC_DELAY_TICKS = 10L;
 
     private final StockExchangePlugin plugin;
     private final File storageFile;
@@ -1156,7 +1164,7 @@ public final class AutoWarehouseManager implements Listener {
             || !this.scheduledWarehouseSyncs.add(warehouseId)) {
             return;
         }
-        Bukkit.getScheduler().runTask(this.plugin, () -> {
+        Bukkit.getScheduler().runTaskLater(this.plugin, () -> {
             this.scheduledWarehouseSyncs.remove(warehouseId);
             if (!this.dataLoaded || !this.plugin.isStorageAvailable()) {
                 return;
@@ -1173,12 +1181,15 @@ public final class AutoWarehouseManager implements Listener {
             } else {
                 this.routePendingBuyDeliveries(record.ownerUuid());
             }
-        });
+        }, EVENT_SYNC_DELAY_TICKS);
     }
 
     private void scheduleByInventory(Inventory inventory) {
         for (String warehouseId : this.findWarehouseIds(inventory)) {
-            this.scheduleSync(warehouseId);
+            WarehouseRecord record = this.records.get(warehouseId);
+            if (record != null && record.type() == WarehouseType.BUY) {
+                this.scheduleSync(warehouseId);
+            }
         }
     }
 
