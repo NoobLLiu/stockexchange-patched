@@ -32,7 +32,7 @@ $geyserJar = Get-ChildItem -LiteralPath $pluginRoot -Filter '*Geyser-Spigot.jar'
     Select-Object -First 1 -ExpandProperty FullName
 $xconomyJar = Get-ChildItem -LiteralPath $pluginRoot -Filter '*XConomy*.jar' -File |
     Select-Object -First 1 -ExpandProperty FullName
-$mgactivitysJar = Join-Path $devRoot 'local-plugins\mgactivitys\build\MGActivitys-1.0.0.jar'
+$mgactivitysJar = Join-Path $devPluginsRoot 'MGActivitys\build\MGActivitys-1.0.0.jar'
 $gmzcmailJar = Join-Path $devRoot 'local-plugins\mail-system\build\GMZCMail-1.0.0.jar'
 $titleJar = Join-Path $devRoot 'local-plugins\title-system\build\GMZCTitles-1.0.0.jar'
 $slimefunJar = Get-ChildItem -LiteralPath $pluginRoot -Filter '*Slimefun-United.jar' -File | Select-Object -First 1 -ExpandProperty FullName
